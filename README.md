@@ -52,12 +52,7 @@ The yellow "Awaiting permission" dot appears when Claude Code fires its permissi
 3. Launch it once. On first launch it wires up the Claude Code hooks for you automatically. (Already had a previous version? You can skip this, just open Claude Code and it updates itself.)
 4. Start a new Claude Code session, the spark appears whenever Claude Code is running.
 
-> **Already have Claude Code open when you install? Restart it (or start a new session) once.** A running session loads its hooks at startup, so it won't pick up the newly installed ones until you start fresh, the bar stays idle until then. After that first restart it's automatic and you never need to do it again.
-
 > The DMG is signed and notarized, so it opens normally, no Gatekeeper warning, no right-click needed.
-
-If first-launch setup ever doesn't take, you can run it manually:
-`node "/Applications/ClaudeStatusBar.app/Contents/Resources/install.js"`
 
 ### Updating to a new version
 
@@ -112,6 +107,7 @@ Requires the Xcode Command Line Tools (`xcode-select --install`).
 - Make sure a Claude session is actually running. Start a new session (or restart Claude Code) and the bar appears automatically.
 - A session that was already running *before* you installed gets picked up once it does something, but starting a fresh session is the reliable way to bring the bar up the first time.
 - Confirm it's running with `pgrep -x ClaudeStatusBar`: a number means it's running (it may just be hidden, see below); no output means it exited because no Claude session is active.
+- If first-launch setup never took, run the installer manually: `node "/Applications/ClaudeStatusBar.app/Contents/Resources/install.js"`
 
 **It's running but I can't see it.** On a Mac with a notch, a crowded menu bar can hide icons behind the notch. Remove some other menu bar items, or use a menu bar manager (Ice, Bartender), to reveal it.
 
