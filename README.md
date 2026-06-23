@@ -1,12 +1,14 @@
 <div align="center">
+<img width="672" height="80" alt="Screen Recording 2026-06-23 at 3 57 47 AM 2" src="https://github.com/user-attachments/assets/97876ac9-cd4f-431b-873a-93220de5bd99" />
+</div>
+<br>
 
-# Claude Status Bar
+## Claude Status Bar
 
 A tiny macOS menu bar app that shows **Claude Code's live status**: an animated Claude spark while it's thinking or running a tool, a yellow dot when it's awaiting your permission, and the elapsed time of the current turn. It sits next to your battery/clock and stays out of the way, no window, no dock icon, no usage dashboards.
 
 _Built so you can tab away during a long "thinking" stretch and still see, at a glance, whether Claude is working, waiting on you, or done._
 
-<br>
 
 <img width="1016" height="566" alt="Claude Status Bar demo" src="https://github.com/user-attachments/assets/55a7b294-e893-4f73-b16b-b8beef784400" />
 
@@ -17,8 +19,6 @@ _Built so you can tab away during a long "thinking" stretch and still see, at a 
 <br>
 
 Signed and notarized. Open it, drag the app to Applications, launch once. See [Install](#install) for details.
-
-</div>
 
 ---
 
