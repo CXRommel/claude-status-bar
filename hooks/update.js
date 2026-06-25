@@ -1,13 +1,34 @@
 #!/usr/bin/env node
 // Invoked by Claude Code hooks. Reads the hook JSON payload on stdin, maps the
-// event to a status, and atomically writes ~/.claude/statusbar/state.json.
+// event to a status, and atomically writes the per-instance state.json.
 // Usage: node update.js <prompt|pre|post|notify|permreq|stop>
+//
+// Multi-instance: each Claude config dir (CLAUDE_CONFIG_DIR) is one "instance".
+// State for instance <label> lives at ~/.claude/statusbar/instances/<label>/state.json,
+// so concurrent instances (e.g. default `claude` and an alias `claude-work`) no longer
+// overwrite each other.
 
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const dir = path.join(os.homedir(), ".claude", "statusbar");
+const root = path.join(os.homedir(), ".claude", "statusbar");
+
+// Instance label = sanitized basename of CLAUDE_CONFIG_DIR (the env var each `claude-*`
+// alias exports), or "default" for a plain `claude` with no override. Must match the
+// `label` the installer derives for the same config dir.
+function instanceLabel() {
+  const cfg = (process.env.CLAUDE_CONFIG_DIR || "").trim();
+  if (cfg) {
+    const base = path.basename(cfg.replace(/[\/\\]+$/, "")).replace(/^\.+/, "");
+    const safe = base.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 64);
+    if (safe) return safe;
+  }
+  return "default";
+}
+
+const label = instanceLabel();
+const dir = path.join(root, "instances", label);
 const statePath = path.join(dir, "state.json");
 const event = process.argv[2] || "";
 
@@ -29,7 +50,7 @@ process.stdin.on("end", () => {
     try {
       fs.mkdirSync(dir, { recursive: true });
       fs.appendFileSync(path.join(dir, "hooks.log"),
-        `${new Date().toISOString()} [${event}] tool=${p.tool_name || "-"} mode=${p.permission_mode || "-"} msg=${JSON.stringify(p.message || "").slice(0, 160)} keys=${Object.keys(p).join(",")}\n`);
+        `${new Date().toISOString()} [${event}] inst=${label} tool=${p.tool_name || "-"} mode=${p.permission_mode || "-"} msg=${JSON.stringify(p.message || "").slice(0, 160)} keys=${Object.keys(p).join(",")}\n`);
     } catch {}
   }
 
@@ -49,21 +70,21 @@ process.stdin.on("end", () => {
 
   const project = p.cwd ? path.basename(p.cwd) : prev.project || "";
   const ts = Math.floor(Date.now() / 1000);
-  let state = "idle", label = "", startedAt = prev.startedAt || 0;
+  let state = "idle", stlabel = "", startedAt = prev.startedAt || 0;
 
   switch (event) {
     case "prompt":
-      state = "thinking"; label = "Thinking…"; startedAt = ts; break;
+      state = "thinking"; stlabel = "Thinking…"; startedAt = ts; break;
     case "pre": {
       const t = p.tool_name || "";
       // Known tools get a friendly verb; everything else (incl. long mcp__server__method
       // names) collapses to a generic "Using tool".
-      state = "tool"; label = TOOL_LABELS[t] || "Using tool";
+      state = "tool"; stlabel = TOOL_LABELS[t] || "Using tool";
       if (!startedAt) startedAt = ts;
       break;
     }
     case "post":
-      state = "thinking"; label = "Thinking…";
+      state = "thinking"; stlabel = "Thinking…";
       if (!startedAt) startedAt = ts;
       break;
     case "notify": {
@@ -74,19 +95,19 @@ process.stdin.on("end", () => {
       const isPerm = p.notification_type === "permission_prompt" ||
         m.includes("permission") || m.includes("approve") || m.includes("allow");
       if (!isPerm) return;
-      state = "permission"; label = "Awaiting permission"; startedAt = 0;
+      state = "permission"; stlabel = "Awaiting permission"; startedAt = 0;
       break;
     }
     case "permreq":
       // Desktop-app permission signal; not redundant with notify (that's CLI-only). See CLAUDE.md.
-      state = "permission"; label = "Awaiting permission"; startedAt = 0; break;
+      state = "permission"; stlabel = "Awaiting permission"; startedAt = 0; break;
     case "stop":
-      state = "done"; label = "Done"; startedAt = 0; break;
+      state = "done"; stlabel = "Done"; startedAt = 0; break;
     default:
       return;
   }
 
-  const out = { state, label, tool: p.tool_name || "", project, sessionId: p.session_id || "", transcript: p.transcript_path || prev.transcript || "", startedAt, ts };
+  const out = { state, label: stlabel, tool: p.tool_name || "", project, instance: label, sessionId: p.session_id || "", transcript: p.transcript_path || prev.transcript || "", startedAt, ts };
   try {
     fs.mkdirSync(dir, { recursive: true });
     const tmp = statePath + "." + process.pid + ".tmp";

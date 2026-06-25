@@ -14,10 +14,16 @@ A tiny macOS menu bar app that shows **Claude Code's live status**: an animated 
 <br>
 
 > [!IMPORTANT]
-> **Multi-session support.** This is built for one active Claude Code session at a time. If you
-> run multiple sessions at once (several terminals, or a terminal plus the desktop app), the menu
-> bar follows the most recently active one. Here is the why, and how you can add it yourself:
-> **[read the story →](https://github.com/m1ckc3s/claude-status-bar/issues/8)**
+> **Instances vs. sessions.** The bar tracks each Claude *instance* — a distinct
+> `CLAUDE_CONFIG_DIR` such as plain `claude` (`~/.claude`) or an alias like `claude-work`
+> (`~/.claude-work`) — independently. When several are active it shows the **busiest** one in the
+> menu bar (awaiting-permission ▸ working ▸ done ▸ idle) and lists them all in the **Instances**
+> dropdown section. Add instances by editing `~/.claude/statusbar/instances.json` (or **Edit
+> instances…** in the menu), then re-run the installer so the hooks reach the new config dir —
+> it re-runs automatically whenever you update the app.
+>
+> Multiple *sessions of the same instance* (several terminals all on `~/.claude`) still share that
+> instance's single status and follow the most recently active one.
 
 ---
 
@@ -84,9 +90,9 @@ The plugin installs the hooks but not the app itself, so drag **Claude Status Ba
 
 ## How it works
 
-The app is stateless. Claude Code hooks write the current status to `~/.claude/statusbar/state.json`; the app polls that file every 0.4s and renders the icon and label. `SessionStart` launches it; it self-quits once the Claude desktop app is closed and no Claude Code session is active (each active session is a file under `~/.claude/statusbar/sessions.d/`).
+The app is stateless. Claude Code hooks write each instance's current status to `~/.claude/statusbar/instances/<label>/state.json`; the app polls every 0.4s, picks the busiest instance for the menu-bar item, and lists them all in the dropdown. `SessionStart` launches it; it self-quits once the Claude desktop app is closed and no Claude Code session is active across any instance (each active session is a file under `~/.claude/statusbar/instances/<label>/sessions.d/`).
 
-The installer merges its hooks into `~/.claude/settings.json` (backing it up first), and the app's only network call is a once-a-day GitHub release check ([details](docs/privacy.md)).
+The set of instances lives in `~/.claude/statusbar/instances.json` (seeded with just the default `~/.claude` on first run). For each entry the installer merges its hooks into `<configDir>/settings.json` (backing it up first), and the app's only network call is a once-a-day GitHub release check ([details](docs/privacy.md)).
 
 ## Uninstall
 

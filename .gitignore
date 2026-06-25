@@ -6,3 +6,4 @@ node_modules/
 # Private maintainer notes (kept out of the public repo)
 CLAUDE.md
 ROADMAP.md
+docs/internal/

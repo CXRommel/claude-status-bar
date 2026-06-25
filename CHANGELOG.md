@@ -3,6 +3,14 @@
 All notable changes to Claude Status Bar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-06-25
+
+### Added
+- **Multi-instance support.** The bar now tracks each Claude *instance* — a distinct `CLAUDE_CONFIG_DIR`, such as plain `claude` (`~/.claude`) or an alias like `claude-work` (`~/.claude-work`) — independently. When several are active it shows the busiest one in the menu bar (awaiting-permission ▸ working ▸ done ▸ idle, ties broken by most recent activity) and lists them all in a new **Instances** dropdown section, with an **Edit instances…** item that opens the registry. Configure which instances to watch in `~/.claude/statusbar/instances.json` (seeded with just the default `~/.claude` on first run); the installer wires its hooks into each instance's own `settings.json`. Multiple sessions of the *same* instance still collapse to that instance's single status, following the most recently active one.
+
+### Changed
+- Hooks now namespace each instance's state and session tracking under `~/.claude/statusbar/instances/<label>/` instead of the single top-level `state.json` / `sessions.d/`. The legacy paths are still read as a fallback during the upgrade window so the bar isn't blank right after updating.
+
 ## [0.2.2] - 2026-06-25
 
 ### Fixed
@@ -73,6 +81,7 @@ All notable changes to Claude Status Bar are documented here. This project follo
 - Signed and notarized DMG so it opens without a Gatekeeper warning.
 - Claude Code plugin marketplace manifest for the plugin install path.
 
+[0.3.0]: https://github.com/m1ckc3s/claude-status-bar/releases/tag/v0.3.0
 [0.2.2]: https://github.com/m1ckc3s/claude-status-bar/releases/tag/v0.2.2
 [0.2.1]: https://github.com/m1ckc3s/claude-status-bar/releases/tag/v0.2.1
 [0.2.0]: https://github.com/m1ckc3s/claude-status-bar/releases/tag/v0.2.0

@@ -2,11 +2,15 @@ import Cocoa
 
 final class StatusController: NSObject, NSMenuDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    let statePath = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/statusbar/state.json")
-    let sessionsDir = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/statusbar/sessions.d")
+    let statusbarDir = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/statusbar")
+    let instancesDir = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/statusbar/instances")
+    let registryPath = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/statusbar/instances.json")
+    // Legacy single-instance paths (pre multi-instance) — used only as a fallback so the bar
+    // isn't blank during the upgrade window before the new hooks write to instances/.
+    let legacyStatePath = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/statusbar/state.json")
+    let legacySessionsDir = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/statusbar/sessions.d")
     let claudeDesktopBundleID = "com.anthropic.claudefordesktop"
 
-    var lastMTime: Date = .distantPast
     var pollTimer: Timer?
     var animTimer: Timer?
     var frameIdx = 0
@@ -16,7 +20,15 @@ final class StatusController: NSObject, NSMenuDelegate {
     let launchGrace: TimeInterval = 5   // settle time after launch before we may quit
     let idleQuitDelay: TimeInterval = 3 // "not needed" must persist this long before quitting
 
-    var current: [String: Any] = [:]
+    // Multi-instance state. One Claude config dir = one instance, keyed by its label
+    // (the subdir name under instances/). The menu bar renders a single "combined" item
+    // for the busiest instance; the dropdown lists them all.
+    var instances: [String: [String: Any]] = [:] // label -> raw state.json contents
+    var instanceOrder: [String] = []             // registry order first, then discovered
+    var instanceNames: [String: String] = [:]    // label -> friendly display name
+    var prevEffByLabel: [String: String] = [:]   // last effective state per instance (completion-sound edge)
+    var lastTurnStartByLabel: [String: Double] = [:] // active turn start per instance (1-min gate)
+
     var activeBase = ""        // label without the elapsed clock
     var startedAt: Double = 0  // unix seconds the current turn began (0 = no clock)
     var activeColor: NSColor? = nil
@@ -37,8 +49,6 @@ final class StatusController: NSObject, NSMenuDelegate {
         s.volume = 0.7 // the clip is loud at full system volume; play it a bit softer
         return s
     }()
-    var prevEff = ""               // last effective state, for detecting turn completion
-    var lastTurnStart: Double = 0  // active turn's start time, for the 1-minute gate
     var iconColor: NSColor? { iconSystem ? nil : brand } // nil => render as an adaptive template
     let codeGlyphs = ["✻", "✽", "✶", "✳", "✢"]
     let codePeaks: [CGFloat] = [1.0, 1.0, 1.0, 1.0, 1.0]
@@ -222,6 +232,25 @@ final class StatusController: NSObject, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
+        menu.addItem(header("Instances"))
+        let live = instanceOrder.filter { instances[$0] != nil }
+        if live.isEmpty {
+            let none = NSMenuItem(title: "No active instances", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            menu.addItem(none)
+        } else {
+            for label in live {
+                let e = effective(instances[label]!)
+                let it = NSMenuItem(title: "\(shortName(label)) — \(rowStatus(e))", action: nil, keyEquivalent: "")
+                it.isEnabled = false
+                menu.addItem(it)
+            }
+        }
+        let edit = NSMenuItem(title: "Edit instances…", action: #selector(editInstances), keyEquivalent: "")
+        edit.target = self
+        menu.addItem(edit)
+
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Version \(currentVersion)", action: nil, keyEquivalent: ""))
         if let latest = UserDefaults.standard.string(forKey: "latestVersion"), versionIsNewer(latest, than: currentVersion) {
             let up = NSMenuItem(title: "Update available", action: #selector(openLatestRelease), keyEquivalent: "")
@@ -247,6 +276,26 @@ final class StatusController: NSObject, NSMenuDelegate {
         if let url = ws.urlForApplication(withBundleIdentifier: "com.anthropic.claudefordesktop") {
             ws.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
         }
+    }
+
+    // Open the instance registry in the user's default editor, seeding a single-instance
+    // template (just the default ~/.claude) if it doesn't exist yet. Users duplicate the entry
+    // to track extra CLAUDE_CONFIG_DIR aliases. The "_comment" key is ignored by the parsers.
+    @objc func editInstances() {
+        if !FileManager.default.fileExists(atPath: registryPath) {
+            let template = """
+            {
+              "_comment": "One entry per Claude instance — each a distinct CLAUDE_CONFIG_DIR. Duplicate the Default line to track an alias, e.g. { \\"name\\": \\"Work\\", \\"configDir\\": \\"~/.claude-work\\", \\"label\\": \\"claude-work\\" }. configDir accepts ~ and $ENV. Re-run the installer (or update the app) after editing so hooks reach the new dir.",
+              "instances": [
+                { "name": "Default", "configDir": "~/.claude", "label": "default" }
+              ]
+            }
+
+            """
+            try? FileManager.default.createDirectory(atPath: statusbarDir, withIntermediateDirectories: true)
+            try? template.write(toFile: registryPath, atomically: true, encoding: .utf8)
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: registryPath))
     }
 
     @objc func toggleTimer() {
@@ -280,28 +329,67 @@ final class StatusController: NSObject, NSMenuDelegate {
 
     func tick() {
         checkLifecycle()
-        let fm = FileManager.default
-        guard let attrs = try? fm.attributesOfItem(atPath: statePath),
-              let m = attrs[.modificationDate] as? Date else {
-            evaluate(); return
-        }
-        if m != lastMTime {
-            lastMTime = m
-            if let data = fm.contents(atPath: statePath),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                current = obj
-            }
-        }
+        loadRegistry()
+        loadInstances()
         evaluate()
     }
 
-    func evaluate() {
-        let state = current["state"] as? String ?? "idle"
-        var label = current["label"] as? String ?? ""
-        let ts = (current["ts"] as? NSNumber)?.doubleValue ?? 0
-        let started = (current["startedAt"] as? NSNumber)?.doubleValue ?? 0
-        let age = Date().timeIntervalSince1970 - ts
+    // Read instances.json (friendly names + ordering). Tolerant of a missing/invalid file.
+    func loadRegistry() {
+        guard let data = FileManager.default.contents(atPath: registryPath),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let arr = obj["instances"] as? [[String: Any]] else { return }
+        var names: [String: String] = [:]
+        var order: [String] = []
+        for it in arr {
+            guard let label = it["label"] as? String, !label.isEmpty else { continue }
+            names[label] = (it["name"] as? String) ?? label
+            order.append(label)
+        }
+        instanceNames = names
+        // Stash the registry order so evaluate()/the menu list instances predictably.
+        registryOrder = order
+    }
+    var registryOrder: [String] = []
 
+    // Load every instance's state.json under instances/. Falls back to the legacy top-level
+    // state.json (as a synthetic "default") so the bar isn't blank right after an upgrade.
+    func loadInstances() {
+        let fm = FileManager.default
+        var found: [String: [String: Any]] = [:]
+        var discovered: [String] = []
+        if let labels = try? fm.contentsOfDirectory(atPath: instancesDir) {
+            for label in labels.sorted() {
+                let sp = (instancesDir as NSString).appendingPathComponent("\(label)/state.json")
+                if let data = fm.contents(atPath: sp),
+                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    found[label] = obj
+                    discovered.append(label)
+                }
+            }
+        }
+        if found.isEmpty,
+           let data = fm.contents(atPath: legacyStatePath),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            found["default"] = obj
+            discovered = ["default"]
+        }
+        instances = found
+        // Registry order first (only labels we actually found), then any extras discovered.
+        instanceOrder = registryOrder.filter { found[$0] != nil }
+            + discovered.filter { !registryOrder.contains($0) }
+    }
+
+    struct Eff { let state: String; let label: String; let started: Double; let ts: Double }
+
+    // Resolve one instance's raw state into its effective state, applying the same recovery
+    // rules the single-instance path used (Esc-interrupt marker + a 900s safety net).
+    func effective(_ s: [String: Any]) -> Eff {
+        let state = s["state"] as? String ?? "idle"
+        var label = s["label"] as? String ?? ""
+        let ts = (s["ts"] as? NSNumber)?.doubleValue ?? 0
+        let started = (s["startedAt"] as? NSNumber)?.doubleValue ?? 0
+        let age = Date().timeIntervalSince1970 - ts
         var eff = state
         // Stop fires on normal completion but NOT on an Esc interrupt or a denied permission
         // prompt: Claude Code writes "[Request interrupted by user]" to the transcript and ends
@@ -309,27 +397,84 @@ final class StatusController: NSObject, NSMenuDelegate {
         // marker; lifecycle.js handles that case.) Full rationale in CLAUDE.md.
         if state == "thinking" || state == "tool" || state == "permission" {
             if age > 900 { eff = "idle"; label = "" } // absolute safety net
-            else if let tr = current["transcript"] as? String,
+            else if let tr = s["transcript"] as? String,
                     let last = lastLine(ofFileAt: tr),
                     last.contains("interrupted by user") {
                 eff = "idle"; label = ""
             }
         }
+        return Eff(state: eff, label: label, started: started, ts: ts)
+    }
 
-        // Chime once when a turn that ran >= 1 min transitions to "done".
-        if (eff == "thinking" || eff == "tool"), started > 0 { lastTurnStart = started }
-        if eff == "done", prevEff != "done", playCompletionSound,
-           lastTurnStart > 0, Date().timeIntervalSince1970 - lastTurnStart >= 60 {
-            completionSound?.play()
+    // Higher wins the single menu-bar slot: an instance awaiting you outranks one merely
+    // working, which outranks one that just finished, which outranks idle.
+    func priority(_ state: String) -> Int {
+        switch state {
+        case "permission": return 3
+        case "tool", "thinking": return 2
+        case "done": return 1
+        default: return 0
         }
-        if eff == "done" { lastTurnStart = 0 }
-        prevEff = eff
+    }
 
-        switch eff {
-        case "thinking":  render(label: label.isEmpty ? "Thinking…" : label, color: iconColor, animate: true,  startedAt: started)
-        case "tool":      render(label: label.isEmpty ? "Working…"  : label, color: iconColor, animate: true,  startedAt: started)
-        case "permission":render(label: "Awaiting permission", color: amber, animate: false, startedAt: 0, dot: true)
-        case "waiting":   render(label: label.isEmpty ? "Waiting" : label, color: iconColor, animate: false, startedAt: 0)
+    func shortName(_ label: String) -> String { instanceNames[label] ?? label }
+
+    // One-line status used in the dropdown's Instances section.
+    func rowStatus(_ e: Eff) -> String {
+        switch e.state {
+        case "permission": return "Awaiting permission"
+        case "tool": return e.label.isEmpty ? "Working…" : e.label
+        case "thinking": return e.label.isEmpty ? "Thinking…" : e.label
+        case "done": return "Done"
+        default: return "Idle"
+        }
+    }
+
+    func evaluate() {
+        // Per-instance completion-sound bookkeeping: chime once when any instance's turn that
+        // ran >= 1 min transitions to "done".
+        for (label, raw) in instances {
+            let e = effective(raw)
+            if (e.state == "thinking" || e.state == "tool"), e.started > 0 { lastTurnStartByLabel[label] = e.started }
+            if e.state == "done", (prevEffByLabel[label] ?? "") != "done", playCompletionSound,
+               let lts = lastTurnStartByLabel[label], lts > 0,
+               Date().timeIntervalSince1970 - lts >= 60 {
+                completionSound?.play()
+            }
+            if e.state == "done" { lastTurnStartByLabel[label] = 0 }
+            prevEffByLabel[label] = e.state
+        }
+        // Drop bookkeeping for instances that vanished.
+        for label in Array(prevEffByLabel.keys) where instances[label] == nil {
+            prevEffByLabel[label] = nil; lastTurnStartByLabel[label] = nil
+        }
+
+        // Pick the "combined" winner: highest priority, ties broken by most recent activity.
+        var winnerLabel: String?
+        var winner: Eff?
+        for label in instanceOrder {
+            guard let raw = instances[label] else { continue }
+            let e = effective(raw)
+            if let w = winner {
+                let p = priority(e.state), wp = priority(w.state)
+                if p > wp || (p == wp && e.ts > w.ts) { winner = e; winnerLabel = label }
+            } else {
+                winner = e; winnerLabel = label
+            }
+        }
+
+        guard let e = winner, let wl = winnerLabel else {
+            render(label: "", color: iconColor, animate: false, startedAt: 0)
+            return
+        }
+        // Prefix the winner's short name only when more than one instance exists and it's
+        // doing something worth attributing.
+        let prefix = (instances.count > 1 && priority(e.state) > 0) ? "\(shortName(wl)) " : ""
+
+        switch e.state {
+        case "thinking":  render(label: prefix + (e.label.isEmpty ? "Thinking…" : e.label), color: iconColor, animate: true,  startedAt: e.started)
+        case "tool":      render(label: prefix + (e.label.isEmpty ? "Working…"  : e.label), color: iconColor, animate: true,  startedAt: e.started)
+        case "permission":render(label: prefix + "Awaiting permission", color: amber, animate: false, startedAt: 0, dot: true)
         default:          render(label: "", color: iconColor, animate: false, startedAt: 0) // done + idle: just the orange spark
         }
     }
@@ -340,8 +485,19 @@ final class StatusController: NSObject, NSMenuDelegate {
         NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == claudeDesktopBundleID }
     }
 
+    // Total live sessions across every instance (each is one file in its sessions.d/),
+    // plus the legacy top-level sessions.d as a fallback during the upgrade window.
     func sessionCount() -> Int {
-        (try? FileManager.default.contentsOfDirectory(atPath: sessionsDir).count) ?? 0
+        let fm = FileManager.default
+        var n = 0
+        if let labels = try? fm.contentsOfDirectory(atPath: instancesDir) {
+            for label in labels {
+                let sd = (instancesDir as NSString).appendingPathComponent("\(label)/sessions.d")
+                n += (try? fm.contentsOfDirectory(atPath: sd).count) ?? 0
+            }
+        }
+        n += (try? fm.contentsOfDirectory(atPath: legacySessionsDir).count) ?? 0
+        return n
     }
 
     // Stay while Claude desktop is open OR a session is active; otherwise quit after a
