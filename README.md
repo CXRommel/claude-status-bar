@@ -8,18 +8,17 @@
 
 A tiny macOS menu bar app that shows **Claude Code's live status**: an animated Claude icon while it's thinking or running a tool, a yellow dot when it's awaiting your permission, and the elapsed time of the current turn. Lightweight, no window, no dock icon, no usage dashboards.
 
-> Built so you can tab away during a long "thinking" stretch and still see, at a glance, whether Claude is working, waiting on you, or done._
+> Built so you can tab away during a long "thinking" stretch and still see, at a glance, whether Claude is working, waiting on you, or done.
 
 <img width="600" height="488" alt="Screen Recording 2026-06-26 at 10 01 17 PM (1)" src="https://github.com/user-attachments/assets/4cc7a726-abe5-4e9c-aa5f-8525ddf6f398" />
 
 > [!IMPORTANT]
 > **Multi-session support.** When several Claude Code sessions run at once (multiple terminals, or
-> a terminal plus the desktop app), the menu bar surfaces the highest-priority one — a session
-> awaiting your permission is never hidden behind one that's merely thinking — names the repo, and
-> the dropdown lists every live session. Click a session to jump to it: desktop sessions focus
-> the Claude app, terminal sessions bring their terminal app to the front (the app, not yet the
-> exact window or tab when you have several open). Precise per-tab focus is in progress:
-> **[issue #19 →](https://github.com/m1ckc3s/claude-status-bar/issues/19)**.
+> a terminal plus the desktop app), the menu bar surfaces the highest-priority one: a session
+> awaiting your permission is never hidden behind one that's thinking. The dropdown lists 
+> every live session. Click a session to jump to it: desktop sessions focus
+> the Claude app, terminal sessions bring their terminal app to the front.
+> Precise per-tab focus is in progress: **[issue #19 →](https://github.com/m1ckc3s/claude-status-bar/issues/19)**.
 
 ---
 
@@ -38,7 +37,7 @@ Everything is controlled from the menu:
   - **Claude Spark**, the web/chat "morph" spark
   - **Claude Code**, the terminal glyph spinner
   - **Crab Walking**, a pixel-art Clawd crab that scuttles while Claude works
-- **Icon color:** **Orange** or **System** (adaptive black/white). All three styles follow this setting: in System mode Crab Walking renders as a shaded monochrome silhouette that matches the menu bar, and in Orange mode it stays its full-color pixel-art self.
+- **Icon color:** **Orange** or **System** (adaptive black/white). All three styles follow this setting: in System mode Crab Walking renders as a shaded monochrome silhouette that matches the menu bar.
 - **Version and update:** the menu shows your current version, with a one-click "Update available" when a newer release exists.
 
 ## Where it works
@@ -61,7 +60,7 @@ Everything is controlled from the menu:
 
 ### Option A — DMG (recommended) 
 
-Signed and notarized. Open it, drag the app to Applications, launch once.
+Signed and notarized.
 
 1. Download the latest `ClaudeStatusBar.dmg` from [Releases](../../releases).
 2. Open it and drag **Claude Status Bar** into Applications.
@@ -107,7 +106,7 @@ I built this for myself, then open-sourced it because other people might find it
 
 This is an unofficial, open-source side project. **It is not affiliated with, endorsed by, or sponsored by Anthropic.** "Claude" and the Claude spark logo are trademarks of Anthropic, used here nominatively. This project is MIT licensed, but that covers the source code only and conveys no rights to Anthropic's trademarks or brand.
 
-If I'm violating or impeding your trademark, Contact me on X Chat ([@mickces](https://x.com/mickces))
+If I'm violating or impeding your trademark, Contact me on X ([@mickces](https://x.com/mickces))
 This is a free side project; I'm not monetizing it.
 
 ## Contributing
