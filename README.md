@@ -97,6 +97,12 @@ node "/Applications/ClaudeStatusBar.app/Contents/Resources/uninstall.js"   # rem
 ```
 Then drag the app to the Trash.
 
+## Acknowledgements
+
+I built this for myself, then open-sourced it because other people might find it handy too, and I'm genuinely thrilled that so many of you do. An extra thank-you to everyone who went the extra mile and contributed code, fixes, and ideas.
+
+**[See the contributors →](docs/acknowledgements.md)**
+
 ## Trademark / Not Affiliated
 
 This is an unofficial, open-source side project. **It is not affiliated with, endorsed by, or sponsored by Anthropic.** "Claude" and the Claude spark logo are trademarks of Anthropic, used here nominatively. This project is MIT licensed, but that covers the source code only and conveys no rights to Anthropic's trademarks or brand.
