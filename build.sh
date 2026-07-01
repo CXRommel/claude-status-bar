@@ -9,10 +9,15 @@ BIN="$APP/Contents/MacOS/ClaudeStatusBar"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 
-echo "Compiling…"
-# Pin the deployment target, else swiftc stamps the binary with the build machine's OS
-# (e.g. macOS 26), making it refuse to launch on older systems despite LSMinimumSystemVersion.
-swiftc -O -target arm64-apple-macos12.0 Sources/*.swift -o "$BIN" -framework Cocoa
+echo "Compiling universal binary (arm64 + x86_64)…"
+# Universal binary so it runs natively on both Apple Silicon and Intel (each Mac uses its own
+# slice, so Rosetta is never involved). swiftc emits one arch per -target, so this is two
+# compiles joined by lipo. Keep the deployment target pinned, else swiftc stamps the binary
+# with the build machine's OS and it refuses to launch on older systems despite LSMinimumSystemVersion.
+swiftc -O -target arm64-apple-macos12.0  Sources/*.swift -o "$BIN.arm64"  -framework Cocoa
+swiftc -O -target x86_64-apple-macos12.0 Sources/*.swift -o "$BIN.x86_64" -framework Cocoa
+lipo -create "$BIN.arm64" "$BIN.x86_64" -output "$BIN"
+rm -f "$BIN.arm64" "$BIN.x86_64"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -23,8 +28,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleDisplayName</key><string>Claude Status Bar</string>
   <key>CFBundleIdentifier</key><string>com.local.claudestatusbar</string>
   <key>CFBundleExecutable</key><string>ClaudeStatusBar</string>
-  <key>CFBundleVersion</key><string>0.3.0</string>
-  <key>CFBundleShortVersionString</key><string>0.3.0</string>
+  <key>CFBundleVersion</key><string>0.3.1</string>
+  <key>CFBundleShortVersionString</key><string>0.3.1</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>LSUIElement</key><true/>
@@ -88,6 +93,11 @@ if [[ "${1:-}" == "--dmg" ]]; then
   cp -R "$APP" "$STAGE/"
   ln -s /Applications "$STAGE/Applications"
 
+  # Eject any stale "Claude Status Bar" volumes from earlier builds first. Otherwise a name
+  # collision mounts this one as "Claude Status Bar 2", the hardcoded /Volumes path below points
+  # at the wrong volume (layout capture silently fails), and the stale mounts pile up in Finder.
+  for d in $(hdiutil info | awk '/Claude Status Bar/ {print $1}'); do hdiutil detach "$d" >/dev/null 2>&1 || true; done
+
   # Lay out the window on a read-write image to capture its .DS_Store, then build the final
   # image from the folder (see below).
   hdiutil create -volname "Claude Status Bar" -srcfolder "$STAGE" -ov -format UDRW build/rw.dmg >/dev/null
@@ -121,8 +131,22 @@ OSA
   cp "/Volumes/Claude Status Bar/.DS_Store" "$STAGE/.DS_Store" 2>/dev/null || true
   hdiutil detach "$device" >/dev/null || true
   rm -f build/rw.dmg
+  # Scrub any hidden folder that may have accrued (.fseventsd, .Trashes, .Spotlight-V100, …),
+  # keeping only the intentional .DS_Store that carries the window layout.
+  find "$STAGE" -maxdepth 1 -name ".*" ! -name ".DS_Store" -exec rm -rf {} + 2>/dev/null || true
   hdiutil create -volname "Claude Status Bar" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
   rm -rf "$STAGE"
+
+  # Guard: the shipped image must hold nothing but the app, the Applications symlink, and the
+  # .DS_Store layout file. Mount read-only and abort before notarizing if any stray hidden entry
+  # slipped in (the recurring .fseventsd/.Trashes problem).
+  vdev="$(hdiutil attach -nobrowse -noautoopen -readonly "$DMG" | grep -E '^/dev/' | tail -1 | awk '{print $1}')"
+  stray="$(find "/Volumes/Claude Status Bar" -maxdepth 1 -name ".*" ! -name ".DS_Store" 2>/dev/null)"
+  hdiutil detach "$vdev" >/dev/null 2>&1 || true
+  if [[ -n "$stray" ]]; then
+    echo "ERROR: DMG has stray hidden entries, aborting before notarize:"; echo "$stray"; exit 1
+  fi
+  echo "DMG verified clean (no stray hidden folders)."
 
   # Sign, then notarize + staple the DMG so the downloaded image opens with no Gatekeeper
   # warning. Stapling writes the ticket into the read-only image's metadata; it does not

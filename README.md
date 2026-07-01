@@ -8,22 +8,23 @@
 
 A tiny macOS menu bar app that shows **Claude Code's live status**: an animated Claude icon while it's thinking or running a tool, a yellow dot when it's awaiting your permission, and the elapsed time of the current turn. Lightweight, no window, no dock icon, no usage dashboards.
 
-> Built so you can tab away during a long "thinking" stretch and still see, at a glance, whether Claude is working, waiting on you, or done._
+> Built so you can tab away during a long "thinking" stretch and still see, at a glance, whether Claude is working, waiting on you, or done.
 
-<img width="710" height="714" alt="Screen Recording 2026-06-25 at 12 16 50 PM" src="https://github.com/user-attachments/assets/68df52f8-9c0e-41a5-83f3-0b8449073055" />
-<br>
+<img width="600" height="488" alt="Screen Recording 2026-06-26 at 10 01 17 PM (1)" src="https://github.com/user-attachments/assets/4cc7a726-abe5-4e9c-aa5f-8525ddf6f398" />
 
 > [!IMPORTANT]
-> **Instances vs. sessions.** The bar tracks each Claude *instance* — a distinct
-> `CLAUDE_CONFIG_DIR` such as plain `claude` (`~/.claude`) or an alias like `claude-work`
-> (`~/.claude-work`) — independently. When several are active it shows the **busiest** one in the
-> menu bar (awaiting-permission ▸ working ▸ done ▸ idle) and lists them all in the **Instances**
-> dropdown section. Add instances by editing `~/.claude/statusbar/instances.json` (or **Edit
-> instances…** in the menu), then re-run the installer so the hooks reach the new config dir —
-> it re-runs automatically whenever you update the app.
+> **Multi-session support.** When several Claude Code sessions run at once (multiple terminals, or
+> a terminal plus the desktop app), the menu bar surfaces the highest-priority one: a session
+> awaiting your permission is never hidden behind one that's thinking. The dropdown lists 
+> every live session. Click a session to jump to it: desktop sessions focus
+> the Claude app, terminal sessions bring their terminal app to the front.
+> Precise per-tab focus is in progress: **[issue #19 →](https://github.com/m1ckc3s/claude-status-bar/issues/19)**.
 >
-> Multiple *sessions of the same instance* (several terminals all on `~/.claude`) still share that
-> instance's single status and follow the most recently active one.
+> **Multiple accounts.** Sessions running under a non-default `CLAUDE_CONFIG_DIR` (e.g. a
+> `claude-work` alias on `~/.claude-work`) are tracked too, each row prefixed with a short alias so
+> you can tell them apart. Manage them via **Configure accounts…** in the menu (it opens
+> `~/.claude/statusbar/instances.json`); saving wires the hooks into each account's `settings.json`
+> automatically.
 
 ---
 
@@ -42,7 +43,7 @@ Everything is controlled from the menu:
   - **Claude Spark**, the web/chat "morph" spark
   - **Claude Code**, the terminal glyph spinner
   - **Crab Walking**, a pixel-art Clawd crab that scuttles while Claude works
-- **Icon color:** **Orange** or **System** (adaptive black/white). The Claude and Claude Code styles follow this setting; Crab Walking is always its orange pixel-art self.
+- **Icon color:** **Orange** or **System** (adaptive black/white). All three styles follow this setting: in System mode Crab Walking renders as a shaded monochrome silhouette that matches the menu bar.
 - **Version and update:** the menu shows your current version, with a one-click "Update available" when a newer release exists.
 
 ## Where it works
@@ -65,7 +66,7 @@ Everything is controlled from the menu:
 
 ### Option A — DMG (recommended) 
 
-Signed and notarized. Open it, drag the app to Applications, launch once.
+Signed and notarized.
 
 1. Download the latest `ClaudeStatusBar.dmg` from [Releases](../../releases).
 2. Open it and drag **Claude Status Bar** into Applications.
@@ -74,8 +75,10 @@ Signed and notarized. Open it, drag the app to Applications, launch once.
 
 ### Updating
 
-Download the latest DMG and drag it into Applications (choose **Replace**). 
-Launch it once, it refreshes its hooks on a version change, then restart Claude Code to pick them up.
+Download the latest DMG and drag it into Applications (choose **Replace**). That's it: it refreshes its own hooks the next time it starts up (on a version change it re-runs its installer automatically), so there's nothing to run by hand. Your next Claude Code session picks them up.
+
+> [!IMPORTANT]
+> **Updated mid-session?** Sessions already open won't show up until they do something (send a prompt) or you start a new `claude` session.
 
 ### Option B — Claude Code plugin
 
@@ -90,9 +93,13 @@ The plugin installs the hooks but not the app itself, so drag **Claude Status Ba
 
 ## How it works
 
-The app is stateless. Claude Code hooks write each instance's current status to `~/.claude/statusbar/instances/<label>/state.json`; the app polls every 0.4s, picks the busiest instance for the menu-bar item, and lists them all in the dropdown. `SessionStart` launches it; it self-quits once the Claude desktop app is closed and no Claude Code session is active across any instance (each active session is a file under `~/.claude/statusbar/instances/<label>/sessions.d/`).
+The app is stateless. Claude Code fires hooks as it works; each session writes its own file under `~/.claude/statusbar/state.d/`, and the app polls those updates and aggregates them across every live session into a single icon, a permission dot if one needs you, animating if any session is working, resting when all are idle. It launches itself when Claude Code opens and quits when nothing's running, so there's nothing to manage.
 
-The set of instances lives in `~/.claude/statusbar/instances.json` (seeded with just the default `~/.claude` on first run). For each entry the installer merges its hooks into `<configDir>/settings.json` (backing it up first), and the app's only network call is a once-a-day GitHub release check ([details](docs/privacy.md)).
+The installer merges its hooks into the `settings.json` of every account listed in `~/.claude/statusbar/instances.json` (just the default `~/.claude` on first run; backing each up first), and the app's only network call is a once-a-day GitHub release check ([details](PRIVACY.md)).
+
+## Troubleshooting
+
+Icon quitting right after you open it, not showing, or not moving in Cursor? See [Troubleshooting](TROUBLESHOOTING.md), most of it is expected behavior, not a bug.
 
 ## Uninstall
 
@@ -101,12 +108,22 @@ node "/Applications/ClaudeStatusBar.app/Contents/Resources/uninstall.js"   # rem
 ```
 Then drag the app to the Trash.
 
+## Acknowledgements
+
+I built this for myself, then open-sourced it because other people might find it handy too, and I'm genuinely thrilled that so many of you do. An extra thank-you to everyone who went the extra mile and contributed code, fixes, and ideas.
+
+**[See the contributors →](ACKNOWLEDGEMENTS.md)**
+
 ## Trademark / Not Affiliated
 
 This is an unofficial, open-source side project. **It is not affiliated with, endorsed by, or sponsored by Anthropic.** "Claude" and the Claude spark logo are trademarks of Anthropic, used here nominatively. This project is MIT licensed, but that covers the source code only and conveys no rights to Anthropic's trademarks or brand.
 
-If I'm violating or impeding your trademark, Contact me on X Chat ([@mickces](https://x.com/mickces))
+If I'm violating or impeding your trademark, Contact me on X ([@mickces](https://x.com/mickces))
 This is a free side project; I'm not monetizing it.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for what fits, what doesn't, and how to build.
 
 ## License
 

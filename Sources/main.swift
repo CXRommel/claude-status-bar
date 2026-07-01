@@ -1,34 +1,251 @@
 import Cocoa
 
+// Custom-drawn toggle. NSSwitch can't show its accent inside a menu (the menu's vibrant, non-key
+// window draws the implicit accent gray), so we render the track + knob as layers and fill the
+// "on" color explicitly. Layer-hosted so the knob can slide on Apple's switch spring (CASpringAnimation),
+// with the track color crossfading; CA animations run in the render server, so they play during menu tracking.
+final class ToggleView: NSView {
+    static let w: CGFloat = 33, h: CGFloat = 16
+    private let track = CALayer()
+    private let knob = CALayer()
+    private var lastToggle = Date.distantPast   // debounce: ignore a re-click within a short window
+    private var hovered = false
+    var isOn: Bool { didSet { updateState(animated: true) } }
+    var onToggle: ((Bool) -> Void)?
+
+    init(isOn: Bool) {
+        self.isOn = isOn
+        super.init(frame: NSRect(x: 0, y: 0, width: ToggleView.w, height: ToggleView.h))
+        layer = CALayer()
+        wantsLayer = true
+        track.frame = bounds
+        track.cornerRadius = bounds.height / 2
+        layer?.addSublayer(track)
+        let kh = bounds.height - 4, kw = kh + 3   // capsule: a touch wider than tall, like modern macOS
+        knob.bounds = CGRect(x: 0, y: 0, width: kw, height: kh)
+        knob.cornerRadius = kh / 2
+        knob.backgroundColor = NSColor.white.cgColor
+        layer?.addSublayer(knob)
+        updateState(animated: false)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override var intrinsicContentSize: NSSize { NSSize(width: ToggleView.w, height: ToggleView.h) }
+
+    private func knobCenter() -> CGPoint {
+        let kw = knob.bounds.width
+        return CGPoint(x: isOn ? bounds.width - kw / 2 - 2 : kw / 2 + 2, y: bounds.height / 2)
+    }
+
+    // Track fill. ON = accent. OFF = an explicit mid gray (the system's faint off color disappears on a
+    // light menu, and a dynamic NSColor's .cgColor can latch the wrong appearance → white-on-white), so
+    // pick black-on-light / white-on-dark from our OWN effectiveAppearance. Hover nudges it darker.
+    private func trackColor() -> CGColor {
+        if isOn {
+            let accent = NSColor.controlAccentColor
+            return (hovered ? (accent.blended(withFraction: 0.10, of: .white) ?? accent) : accent).cgColor
+        }
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let base: CGFloat = dark ? 1.0 : 0.0
+        let alpha: CGFloat = (dark ? 0.30 : 0.34) + (hovered ? 0.10 : 0)
+        return NSColor(white: base, alpha: alpha).cgColor
+    }
+
+    private func updateState(animated: Bool) {
+        let toColor = trackColor()
+        let toPos = knobCenter()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if animated {
+            let spring = CASpringAnimation(keyPath: "position")
+            spring.fromValue = NSValue(point: knob.presentation()?.position ?? knob.position)
+            spring.toValue = NSValue(point: toPos)
+            spring.damping = 16; spring.stiffness = 260; spring.mass = 1; spring.initialVelocity = 0
+            spring.duration = spring.settlingDuration
+            knob.add(spring, forKey: "position")
+            let col = CABasicAnimation(keyPath: "backgroundColor")
+            col.fromValue = track.presentation()?.backgroundColor ?? track.backgroundColor
+            col.toValue = toColor
+            col.duration = 0.2
+            track.add(col, forKey: "backgroundColor")
+        }
+        knob.position = toPos
+        track.backgroundColor = toColor
+        CATransaction.commit()
+    }
+
+    // Recolor when the view actually lands in the menu (its effectiveAppearance only resolves to the
+    // menu's light/dark then, not at init), so the off gray matches the menu it's drawn on.
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateState(animated: false)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+    override func mouseEntered(with event: NSEvent) { hovered = true; updateState(animated: false) }
+    override func mouseExited(with event: NSEvent) { hovered = false; updateState(animated: false) }
+
+    override func mouseDown(with event: NSEvent) {
+        guard Date().timeIntervalSince(lastToggle) > 0.1 else { return }
+        lastToggle = Date()
+        isOn.toggle()
+        onToggle?(isOn)
+    }
+}
+
+// A session row as a custom view so a flexible spacer can pin the timer + pill to the true trailing
+// edge (a plain menu-item title can't cross the menu's reserved shortcut/submenu-arrow column).
+// Layout: [icon] name  <spacer>  timer  [pill], with timer+pill pinned right via autoresizing.
+final class SessionRowView: NSView {
+    let id: String
+    var onClick: (() -> Void)?
+    private let iconView = NSImageView()
+    private let nameField = NSTextField(labelWithString: "")
+    private let timerField = NSTextField(labelWithString: "")
+    private let pillView = NSImageView()
+    private let pad: CGFloat = 14, iconSize: CGFloat = 16, rowH: CGFloat = 24, timerW: CGFloat = 74
+    private let highlightView = NSVisualEffectView()  // system selection material = exact native highlight
+    private var hovered = false
+    private var iconBaseTint: NSColor?       // tint when not hovered (template icons); white on hover
+    private var pillNormal: NSImage?, pillSelected: NSImage?
+
+    init(id: String, width: CGFloat) {
+        self.id = id
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: rowH))
+        autoresizingMask = [.width]
+        highlightView.material = .selection
+        highlightView.state = .active
+        highlightView.isEmphasized = true
+        highlightView.wantsLayer = true
+        highlightView.layer?.cornerRadius = 5
+        highlightView.isHidden = true
+        addSubview(highlightView)
+        iconView.frame = NSRect(x: pad, y: (rowH - iconSize) / 2, width: iconSize, height: iconSize)
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        iconView.autoresizingMask = [.maxXMargin]
+        addSubview(iconView)
+        nameField.font = .menuFont(ofSize: 0)
+        nameField.textColor = .labelColor
+        nameField.lineBreakMode = .byTruncatingTail
+        nameField.frame = NSRect(x: pad + iconSize + 8, y: (rowH - 16) / 2, width: 160, height: 16)
+        nameField.autoresizingMask = [.maxXMargin]
+        addSubview(nameField)
+        timerField.font = NSFont.monospacedSystemFont(ofSize: NSFont.menuFont(ofSize: 0).pointSize - 2, weight: .regular)
+        timerField.textColor = .secondaryLabelColor
+        timerField.alignment = .right
+        timerField.autoresizingMask = [.minXMargin]
+        addSubview(timerField)
+        pillView.imageScaling = .scaleNone
+        pillView.autoresizingMask = [.minXMargin]
+        addSubview(pillView)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func setIcon(_ img: NSImage?) { iconView.image = img }
+
+    func configure(icon: NSImage?, iconTint: NSColor?, name: String, timer: String?,
+                   pillNormal: NSImage?, pillSelected: NSImage?, pillInset: CGFloat, timerGap: CGFloat) {
+        let w = bounds.width
+        iconView.image = icon
+        iconBaseTint = iconTint
+        iconView.contentTintColor = hovered ? .white : iconTint
+        nameField.stringValue = name
+        self.pillNormal = pillNormal; self.pillSelected = pillSelected
+        let pill = hovered ? pillSelected : pillNormal
+        var pillLeft = w - pillInset
+        if let pill = pill {
+            pillView.isHidden = false
+            pillView.image = pill
+            pillView.frame = NSRect(x: w - pillInset - pill.size.width, y: (rowH - pill.size.height) / 2,
+                                    width: pill.size.width, height: pill.size.height)
+            pillLeft = pillView.frame.minX
+        } else { pillView.isHidden = true }
+        if let timer = timer {
+            timerField.isHidden = false
+            timerField.stringValue = timer
+            timerField.frame = NSRect(x: pillLeft - timerGap - timerW, y: (rowH - 16) / 2, width: timerW, height: 16)
+        } else { timerField.isHidden = true }
+    }
+    // Custom views don't get the menu's automatic hover highlight, so draw it ourselves.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+    override func mouseEntered(with event: NSEvent) { setHover(true) }
+    override func mouseExited(with event: NSEvent) { setHover(false) }
+    private func setHover(_ h: Bool) {
+        hovered = h
+        highlightView.isHidden = !h
+        nameField.textColor = h ? .white : .labelColor
+        timerField.textColor = h ? .white : .secondaryLabelColor
+        iconView.contentTintColor = h ? .white : iconBaseTint
+        if !pillView.isHidden { pillView.image = h ? pillSelected : pillNormal }
+    }
+    override func layout() {
+        super.layout()
+        highlightView.frame = bounds.insetBy(dx: 5, dy: 0)
+    }
+    override func mouseDown(with event: NSEvent) { onClick?() }
+}
+
 final class StatusController: NSObject, NSMenuDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    let statusbarDir = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/statusbar")
-    let instancesDir = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/statusbar/instances")
+    let stateDir = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/statusbar/state.d")
     let registryPath = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/statusbar/instances.json")
-    // Legacy single-instance paths (pre multi-instance) — used only as a fallback so the bar
-    // isn't blank during the upgrade window before the new hooks write to instances/.
-    let legacyStatePath = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/statusbar/state.json")
-    let legacySessionsDir = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/statusbar/sessions.d")
     let claudeDesktopBundleID = "com.anthropic.claudefordesktop"
 
     var pollTimer: Timer?
     var animTimer: Timer?
+    var spinTimer: Timer?      // rotates the working-state spinner while the menu is open
+    var spinAngle: CGFloat = 0
     var frameIdx = 0
 
     let launchedAt = Date()
     var notNeededSince: Date?
     let launchGrace: TimeInterval = 5   // settle time after launch before we may quit
     let idleQuitDelay: TimeInterval = 3 // "not needed" must persist this long before quitting
+    // "Hide idle after" setting (seconds): hide a resting session's ROW once it's been quiet this long.
+    // Render-only — it never deletes the file or affects liveness (that's pid-driven now), and the
+    // most-recent session is always kept visible (floor at one). 0 = Never. Defaults to 30 min.
+    var stalePruneAge: TimeInterval { UserDefaults.standard.object(forKey: "hideIdleAfter") as? Double ?? 1800 }
 
-    // Multi-instance state. One Claude config dir = one instance, keyed by its label
-    // (the subdir name under instances/). The menu bar renders a single "combined" item
-    // for the busiest instance; the dropdown lists them all.
-    var instances: [String: [String: Any]] = [:] // label -> raw state.json contents
-    var instanceOrder: [String] = []             // registry order first, then discovered
-    var instanceNames: [String: String] = [:]    // label -> friendly display name
-    var prevEffByLabel: [String: String] = [:]   // last effective state per instance (completion-sound edge)
-    var lastTurnStartByLabel: [String: Double] = [:] // active turn start per instance (1-min gate)
+    struct Session {
+        var id: String, state: String, label: String, project: String, instance: String, transcript: String
+        var entrypoint: String  // CLAUDE_CODE_ENTRYPOINT: "cli", "claude-desktop", …
+        var termProgram: String // TERM_PROGRAM for CLI sessions: "Apple_Terminal", "iTerm.app", …
+        var pid: Int32          // the session's `claude` process; kill(pid,0) drives liveness. 0 = pre-upgrade file.
+        var started: Bool       // true once the session had real activity (a prompt/tool); a merely-opened
+                                // conversation seeds started=false and stays out of the dropdown.
+        var startedAt: Double, ts: Double
+        var eff: String = ""   // effective state, recomputed once per tick in evaluate()
 
+        init(json o: [String: Any], id: String) {
+            self.id = id
+            self.state = o["state"] as? String ?? "idle"
+            self.label = o["label"] as? String ?? ""
+            self.project = o["project"] as? String ?? ""
+            self.instance = o["instance"] as? String ?? ""
+            self.transcript = o["transcript"] as? String ?? ""
+            self.entrypoint = o["entrypoint"] as? String ?? ""
+            self.termProgram = o["term_program"] as? String ?? ""
+            self.pid = Int32(truncatingIfNeeded: (o["pid"] as? NSNumber)?.intValue ?? 0)
+            self.started = o["started"] as? Bool ?? false
+            self.startedAt = (o["startedAt"] as? NSNumber)?.doubleValue ?? 0
+            self.ts = (o["ts"] as? NSNumber)?.doubleValue ?? 0
+        }
+    }
+    var sessions: [String: Session] = [:]  // id -> latest parsed per-session state
+    var fileMTimes: [String: Date] = [:]   // "<id>.json" -> last-parsed mtime (re-parse only on change)
+    var instanceNames: [String: String] = [:]  // instance label -> friendly alias from instances.json
+    var registryMTime: Date?                    // instances.json mtime (re-read only on change)
+    var soundPrev: [String: String] = [:]  // id -> previous raw state (completion-sound edge)
+    var turnStart: [String: Double] = [:]  // id -> active turn start (1-min sound gate)
+    var menuIsOpen = false                  // refresh the dropdown's per-session timers only while open
+    var sessionMenuItems: [(item: NSMenuItem, id: String)] = []
     var activeBase = ""        // label without the elapsed clock
     var startedAt: Double = 0  // unix seconds the current turn began (0 = no clock)
     var activeColor: NSColor? = nil
@@ -58,6 +275,9 @@ final class StatusController: NSObject, NSMenuDelegate {
     lazy var codeGlyphMasks: [NSImage] = codeGlyphs.map { StatusController.glyphMask($0) }
     let crabFPS: Double = 12.5 // matches the source GIF's 0.08s frame delay
     lazy var crabFrames: [NSImage] = StatusController.decodePNGs(clawdCrabFramePNGs)
+    // Template frames: bright pixels (white eyes) become transparent holes so they're
+    // visible as negative space against the menu bar in System color mode.
+    lazy var crabTemplateFrames: [NSImage] = crabFrames.map { adaptiveCrabFrame($0) }
     var fps: Double {
         switch animStyle {
         case .web: return spriteFPS
@@ -93,12 +313,18 @@ final class StatusController: NSObject, NSMenuDelegate {
     }
 
     // Re-runs on first install AND on every version change, so upgrades pick up hook
-    // changes and retire old artifacts. See CLAUDE.md "ensureHooksInstalled" for why.
+    // changes and retire old artifacts.
     func ensureHooksInstalled() {
         let d = UserDefaults.standard
         let current = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? ""
-        guard d.string(forKey: "installedVersion") != current,
-              let installer = Bundle.main.path(forResource: "install", ofType: "js") else { return }
+        guard d.string(forKey: "installedVersion") != current else { return }
+        runInstaller { UserDefaults.standard.set(current, forKey: "installedVersion") }
+    }
+
+    // Spawn install.js (wires the hooks into every account's settings.json). Used on version change
+    // and whenever the account registry is edited, so a newly-added account's hooks get installed.
+    func runInstaller(_ onSuccess: (() -> Void)? = nil) {
+        guard let installer = Bundle.main.path(forResource: "install", ofType: "js") else { return }
         DispatchQueue.global().async {
             guard let node = Self.locateNode() else {
                 NSLog("ClaudeStatusBar: could not find node; hooks not installed (will retry next launch)")
@@ -109,7 +335,7 @@ final class StatusController: NSObject, NSMenuDelegate {
             task.arguments = [installer]
             try? task.run()
             task.waitUntilExit()
-            if task.terminationStatus == 0 { UserDefaults.standard.set(current, forKey: "installedVersion") }
+            if task.terminationStatus == 0 { onSuccess?() }
         }
     }
 
@@ -155,7 +381,6 @@ final class StatusController: NSObject, NSMenuDelegate {
     let releasePageURL = "https://github.com/m1ckc3s/claude-status-bar/releases/latest"
 
     // Once/day: cache GitHub's latest release tag in UserDefaults. Nothing sent to us.
-    // See CLAUDE.md "Update check" for the privacy/behavior notes.
     func checkForUpdate() {
         let d = UserDefaults.standard
         let now = Date().timeIntervalSince1970
@@ -190,65 +415,145 @@ final class StatusController: NSObject, NSMenuDelegate {
 
     // MARK: menu
 
+    // The poll timer runs in .common mode, so it keeps firing while the menu tracks; we use that
+    // to live-update the per-session elapsed clocks. menuNeedsUpdate rebuilds the rows on each open.
+    func menuWillOpen(_ menu: NSMenu) {
+        menuIsOpen = true
+        spinTimer?.invalidate()
+        let t = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in self?.spinTick() }
+        RunLoop.main.add(t, forMode: .common)  // .common so it fires during menu tracking
+        spinTimer = t
+    }
+    func menuDidClose(_ menu: NSMenu) {
+        menuIsOpen = false
+        sessionMenuItems.removeAll()
+        spinTimer?.invalidate(); spinTimer = nil
+    }
+
+    func spinTick() {
+        spinAngle += 5   // 30fps * 5° = 150°/s ≈ 0.42 rev/s, a calm spin
+        guard let img = rotatedSpinner(spinAngle) else { return }
+        let now = Date().timeIntervalSince1970
+        for (item, id) in sessionMenuItems {
+            guard let s = sessions[id], let v = item.view as? SessionRowView else { continue }
+            let eff = s.eff.isEmpty ? effectiveState(s, now: now) : s.eff
+            if eff == "thinking" || eff == "tool" { v.setIcon(img) }
+        }
+    }
+
+    // The session SET only changes on reopen (NSMenu can't add/remove rows reliably mid-track).
+    func refreshOpenMenuRows() {
+        let now = Date().timeIntervalSince1970
+        for (item, id) in sessionMenuItems {
+            guard let s = sessions[id], let v = item.view as? SessionRowView else { continue }
+            let eff = s.eff.isEmpty ? effectiveState(s, now: now) : s.eff
+            configureSessionRow(v, s, eff: eff)
+        }
+    }
+
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         checkForUpdate() // refreshes the update cache for next open (gated to once a day)
 
-        let openItem = NSMenuItem(title: "Open Claude", action: #selector(openClaude), keyEquivalent: "")
-        openItem.target = self
-        menu.addItem(openItem)
-        menu.addItem(.separator())
+        sessionMenuItems.removeAll()
+        let now = Date().timeIntervalSince1970
+        // Gate ONLY the desktop app: opening/clicking a conversation there seeds an idle session without
+        // real activity (the click-through clutter), so a desktop session stays out of the dropdown until
+        // a prompt/tool fires (started=true). CLI / terminal / editor sessions are launched deliberately,
+        // so they surface the moment they start. Any active state counts as started too (and covers
+        // pre-upgrade files with no flag).
+        let allOrdered = sessions.values.sorted { $0.ts > $1.ts }   // most-recent first
+        let ordered = allOrdered.filter { s in
+                let eff = s.eff.isEmpty ? effectiveState(s, now: now) : s.eff
+                let resting = !(eff == "permission" || eff == "thinking" || eff == "tool")
+                let gated = s.entrypoint == "claude-desktop"   // only the desktop app is gated
+                return !gated || s.started || !resting
+            }
+        // Hide rows idle past the threshold, but ALWAYS keep the most-recent started session (floor at
+        // one) so the dropdown never goes empty while a session is alive. Hiding is render-only; the file
+        // (and thus liveness) is untouched — see stalePruneAge and the pid-driven reap in evaluate().
+        var visible = ordered.filter { s in
+            let eff = s.eff.isEmpty ? effectiveState(s, now: now) : s.eff
+            let resting = !(eff == "permission" || eff == "thinking" || eff == "tool")
+            return !(stalePruneAge > 0 && resting && now - s.ts > stalePruneAge)
+        }
+        if visible.isEmpty, let lead = ordered.first { visible = [lead] }   // floor: never empty while alive
+
+        if !visible.isEmpty {
+            menu.addItem(header("Sessions"))
+            for s in visible {
+                let eff = s.eff.isEmpty ? effectiveState(s, now: now) : s.eff
+                let view = SessionRowView(id: s.id, width: CGFloat(uiConfig()["boxWidth"] ?? 300))
+                let sid = s.id, ep = s.entrypoint, tp = s.termProgram
+                view.onClick = { [weak self] in menu.cancelTracking(); self?.openSession(sid, entrypoint: ep, termProgram: tp) }
+                configureSessionRow(view, s, eff: eff)
+                let it = NSMenuItem()
+                it.view = view
+                menu.addItem(it)
+                sessionMenuItems.append((it, s.id))  // kept so tick() can live-update the timers
+            }
+            menu.addItem(.separator())
+        } else if claudeDesktopRunning() {
+            // No live session to pin, but the desktop app is up — give a way to jump back in.
+            menu.addItem(header("Sessions"))
+            let open = NSMenuItem(title: "Open Claude", action: #selector(openClaude), keyEquivalent: "")
+            open.target = self
+            menu.addItem(open)
+            menu.addItem(.separator())
+        }
+
         menu.addItem(header("Options"))
 
-        let timerItem = NSMenuItem(title: "Show timer", action: #selector(toggleTimer), keyEquivalent: "")
-        timerItem.target = self
-        timerItem.state = showTimer ? .on : .off
-        menu.addItem(timerItem)
+        menu.addItem(toggleRow(title: "Show timer", isOn: showTimer) { [weak self] on in
+            self?.showTimer = on
+            UserDefaults.standard.set(on, forKey: "showTimer")
+            self?.applyTitle()
+        })
+        menu.addItem(toggleRow(title: "Completion sound (1m+)", isOn: playCompletionSound) { [weak self] on in
+            self?.playCompletionSound = on
+            UserDefaults.standard.set(on, forKey: "completionSound")
+        })
 
-        let soundItem = NSMenuItem(title: "Play Completion Sound", action: #selector(toggleSound), keyEquivalent: "")
-        soundItem.target = self
-        soundItem.state = playCompletionSound ? .on : .off
-        if #available(macOS 14.0, *) { soundItem.badge = NSMenuItemBadge(string: "1m+") }
-        menu.addItem(soundItem)
-
-        menu.addItem(.separator())
-        menu.addItem(header("Animation"))
+        let animParent = NSMenuItem(title: "Animation Style", action: nil, keyEquivalent: "")
+        let animSub = NSMenu()
         for (style, name) in [(AnimStyle.web, "Claude Spark"), (AnimStyle.code, "Claude Code"), (AnimStyle.crab, "Crab Walking")] {
             let it = NSMenuItem(title: name, action: #selector(chooseStyle(_:)), keyEquivalent: "")
             it.target = self
             it.representedObject = style.rawValue
             it.state = animStyle == style ? .on : .off
-            menu.addItem(it)
+            animSub.addItem(it)
         }
+        animParent.submenu = animSub
+        menu.addItem(animParent)
 
-        menu.addItem(.separator())
-        menu.addItem(header("Color"))
+        let colorParent = NSMenuItem(title: "Color theme", action: nil, keyEquivalent: "")
+        let colorSub = NSMenu()
         for (sys, name) in [(false, "Orange"), (true, "System")] {
             let it = NSMenuItem(title: name, action: #selector(chooseColor(_:)), keyEquivalent: "")
             it.target = self
             it.representedObject = sys
             it.state = iconSystem == sys ? .on : .off
-            menu.addItem(it)
+            colorSub.addItem(it)
         }
+        colorParent.submenu = colorSub
+        menu.addItem(colorParent)
 
-        menu.addItem(.separator())
-        menu.addItem(header("Instances"))
-        let live = instanceOrder.filter { instances[$0] != nil }
-        if live.isEmpty {
-            let none = NSMenuItem(title: "No active instances", action: nil, keyEquivalent: "")
-            none.isEnabled = false
-            menu.addItem(none)
-        } else {
-            for label in live {
-                let e = effective(instances[label]!)
-                let it = NSMenuItem(title: "\(shortName(label)) — \(rowStatus(e))", action: nil, keyEquivalent: "")
-                it.isEnabled = false
-                menu.addItem(it)
-            }
+        let hideParent = NSMenuItem(title: "Hide idle sessions", action: nil, keyEquivalent: "")
+        let hideSub = NSMenu()
+        let curHide = stalePruneAge
+        for (name, secs) in [("5 minutes", 300.0), ("15 minutes", 900.0), ("30 minutes", 1800.0), ("1 hour", 3600.0), ("Never", 0.0)] {
+            let it = NSMenuItem(title: name, action: #selector(chooseHideIdle(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = secs
+            it.state = curHide == secs ? .on : .off
+            hideSub.addItem(it)
         }
-        let edit = NSMenuItem(title: "Edit instances…", action: #selector(editInstances), keyEquivalent: "")
-        edit.target = self
-        menu.addItem(edit)
+        hideParent.submenu = hideSub
+        menu.addItem(hideParent)
+
+        let accounts = NSMenuItem(title: "Configure accounts…", action: #selector(editInstances), keyEquivalent: "")
+        accounts.target = self
+        menu.addItem(accounts)
 
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Version \(currentVersion)", action: nil, keyEquivalent: ""))
@@ -257,7 +562,7 @@ final class StatusController: NSObject, NSMenuDelegate {
             up.target = self
             menu.addItem(up)
         }
-        let q = NSMenuItem(title: "Quit Claude Status Bar", action: #selector(quit), keyEquivalent: "q")
+        let q = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
         q.target = self
         menu.addItem(q)
     }
@@ -269,6 +574,220 @@ final class StatusController: NSObject, NSMenuDelegate {
         return it
     }
 
+    func toggleRow(title: String, isOn: Bool, onToggle: @escaping (Bool) -> Void) -> NSMenuItem {
+        let width = CGFloat(uiConfig()["boxWidth"] ?? 300), height: CGFloat = 24, leftInset: CGFloat = 14, rightInset: CGFloat = 12
+        let row = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        row.autoresizingMask = [.width]
+
+        // Dim a trailing parenthetical (e.g. the "(1m+)" qualifier) so it reads as a secondary note.
+        let labelFont = NSFont.menuFont(ofSize: 0)
+        let attr = NSMutableAttributedString(string: title, attributes: [.font: labelFont, .foregroundColor: NSColor.labelColor])
+        if let r = title.range(of: " (") {
+            attr.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: NSRange(r.lowerBound..<title.endIndex, in: title))
+        }
+        let label = NSTextField(labelWithAttributedString: attr)
+        label.sizeToFit()
+        label.setFrameOrigin(NSPoint(x: leftInset, y: (height - label.frame.height) / 2))
+        label.autoresizingMask = [.maxXMargin]
+        row.addSubview(label)
+
+        let toggle = ToggleView(isOn: isOn)
+        toggle.onToggle = onToggle
+        toggle.setFrameOrigin(NSPoint(x: width - toggle.frame.width - rightInset, y: (height - toggle.frame.height) / 2))
+        toggle.autoresizingMask = [.minXMargin]
+        row.addSubview(toggle)
+
+        let item = NSMenuItem()
+        item.view = row
+        return item
+    }
+
+    func sessionMenuLine(_ s: Session) -> String {
+        let now = Date().timeIntervalSince1970
+        let eff = s.eff.isEmpty ? effectiveState(s, now: now) : s.eff  // cached by evaluate() each tick
+        // The icon carries the state (spinner / amber dot / caret); the row text is just the project,
+        // plus a live timer while working since the spinner can't convey elapsed.
+        var line = truncated(sessionName(s))
+        if eff == "thinking" || eff == "tool", s.startedAt > 0 {
+            line += "  " + elapsed(max(0, Int(now - s.startedAt)))
+        }
+        return line
+    }
+
+    // Live layout knobs read fresh from ~/.claude/statusbar/uiconfig.json each render, so numeric
+    // tweaks (timer column, pill offset, gap) take effect on the next menu open with NO rebuild.
+    func uiConfig() -> [String: Double] {
+        let p = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/statusbar/uiconfig.json")
+        guard let d = FileManager.default.contents(atPath: p),
+              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
+        return j.compactMapValues { ($0 as? NSNumber)?.doubleValue }
+    }
+
+    func configureSessionRow(_ v: SessionRowView, _ s: Session, eff: String) {
+        let cfg = uiConfig()
+        let now = Date().timeIntervalSince1970
+        let nameMax = Int(cfg["nameMax"] ?? 16)
+        let working = (eff == "thinking" || eff == "tool") && s.startedAt > 0
+        let resting = !(eff == "permission" || eff == "thinking" || eff == "tool")  // the dim caret
+        let tag = surfaceTag(s.entrypoint)
+        v.configure(icon: sessionSymbol(s, eff: eff),
+                    iconTint: resting ? .tertiaryLabelColor : .labelColor,  // caret dim; spinner matches the name font; amber image ignores tint
+                    name: truncated(sessionName(s), max: nameMax, keep: nameMax),
+                    timer: working ? elapsed(max(0, Int(now - s.startedAt))) : nil,
+                    pillNormal: tag.isEmpty ? nil : pillImage(tag),
+                    pillSelected: tag.isEmpty ? nil : pillImage(tag, selected: true),
+                    pillInset: CGFloat(cfg["pillInset"] ?? 12),
+                    timerGap: CGFloat(cfg["timerGap"] ?? 10))
+    }
+
+    func statusText(_ s: Session, eff: String) -> String {
+        switch eff {
+        case "permission":       return "Awaiting permission"
+        case "thinking", "tool": return workingLabel(s)
+        default:                 return s.state == "done" ? "Done" : "Idle"
+        }
+    }
+
+    // Just the repo/cwd; the surface (CLI/APP) renders as a trailing badge instead of inline.
+    // A non-default CLAUDE_CONFIG_DIR (a distinct account) is prefixed with its friendly alias
+    // from instances.json so concurrent accounts are distinguishable; the plain `default`
+    // account shows the project alone.
+    func sessionName(_ s: Session) -> String {
+        let base = s.project.isEmpty ? "session" : s.project
+        if s.instance.isEmpty || s.instance == "default" { return base }
+        let alias = instanceNames[s.instance] ?? s.instance   // friendly registry name, else the raw label
+        return "\(alias): \(base)"
+    }
+
+    // CLAUDE_CODE_ENTRYPOINT -> a short all-caps badge tag.
+    // Every surface collapses to a 3-letter pill: the desktop app is APP, everything else (cli,
+    // vscode, cursor, windsurf, …) is a terminal/editor context, so CLI. Keeps pills uniform.
+    func surfaceTag(_ entrypoint: String) -> String {
+        switch entrypoint {
+        case "claude-desktop": return "APP"
+        case "":               return ""
+        default:               return "CLI"
+        }
+    }
+
+    // CLI/APP pill rendered as an image so it can sit inside the row text (right after the timer)
+    // rather than as a system badge pinned to the menu edge with a fixed, uncloseable gap.
+    func pillImage(_ text: String, selected: Bool = false) -> NSImage {
+        let t = text as NSString
+        let font = NSFont.monospacedSystemFont(ofSize: 9.5, weight: .semibold)  // mono -> 3 chars = uniform width
+        let pad: CGFloat = 7, h: CGFloat = 15
+        let cfg = uiConfig()
+        let dy = CGFloat(cfg["pillTextY"] ?? -1)  // negative nudges the text down (it reads top-heavy)
+        // Pill bg is a tunable gray per mode (black-on-light / white-on-dark at a low alpha) so light
+        // mode can be lightened independently. On a selected (blue) row it's a light translucent pill.
+        let dark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let bgAlpha = CGFloat(cfg[dark ? "pillBgDark" : "pillBgLight"] ?? (dark ? 0.14 : 0.10))
+        let bg = selected ? NSColor.white.withAlphaComponent(0.22)
+                          : (dark ? NSColor.white : NSColor.black).withAlphaComponent(bgAlpha)
+        let fg = selected ? NSColor.white : NSColor.labelColor
+        let w = ceil(t.size(withAttributes: [.font: font]).width) + pad * 2
+        return NSImage(size: NSSize(width: w, height: h), flipped: false) { rect in
+            bg.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: h / 2, yRadius: h / 2).fill()
+            let a: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: fg]
+            let ts = t.size(withAttributes: a)
+            t.draw(at: NSPoint(x: (rect.width - ts.width) / 2, y: (rect.height - ts.height) / 2 + dy), withAttributes: a)
+            return true
+        }
+    }
+
+    func sessionSymbol(_ s: Session, eff: String) -> NSImage? {
+        switch eff {
+        case "permission":       return symbolImage("exclamationmark.circle.fill", tint: amber)
+        case "thinking", "tool": return rotatedSpinner(spinAngle)
+        default:                 return restingCaret   // done/idle merged: dim "ready for input" caret
+        }
+    }
+
+    // The shell-style prompt caret (U+276F, what Claude Code shows when idle), dimmed and centered in
+    // a square that matches the spinner gutter so the resting rows align with the working ones.
+    lazy var restingCaret: NSImage? = {
+        let glyph = "\u{276F}" as NSString
+        let font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        let side = spinnerBase?.size.width ?? 15
+        let img = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
+            let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.black]
+            let g = glyph.size(withAttributes: attrs)
+            glyph.draw(at: NSPoint(x: (side - g.width) / 2, y: (side - g.height) / 2), withAttributes: attrs)
+            return true
+        }
+        img.isTemplate = true   // tint via contentTintColor: dim (tertiary) normally, white on hover
+        return img
+    }()
+
+    // Pre-rendered into a padded SQUARE canvas with the glyph centered, so rotation pivots on the
+    // visual center (an off-center pivot makes the spinner orbit/wobble instead of spinning in place).
+    lazy var spinnerBase: NSImage? = {
+        let name: String
+        if #available(macOS 15.0, *) { name = "progress.indicator" } else { name = "rays" }
+        let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        guard let sym = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(cfg) else { return nil }
+        let side = ceil(max(sym.size.width, sym.size.height)) + 2
+        let img = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
+            sym.draw(in: NSRect(x: (side - sym.size.width) / 2, y: (side - sym.size.height) / 2,
+                                width: sym.size.width, height: sym.size.height))
+            return true
+        }
+        img.isTemplate = true
+        return img
+    }()
+
+    func rotatedSpinner(_ angleDeg: CGFloat) -> NSImage? {
+        guard let base = spinnerBase else { return nil }
+        let size = base.size
+        let img = NSImage(size: size, flipped: false) { rect in
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+            ctx.translateBy(x: size.width / 2, y: size.height / 2)
+            ctx.rotate(by: -angleDeg * .pi / 180)
+            ctx.translateBy(x: -size.width / 2, y: -size.height / 2)
+            base.draw(in: rect)
+            return true
+        }
+        img.isTemplate = true
+        return img
+    }
+
+    func symbolImage(_ name: String, tint: NSColor? = nil) -> NSImage? {
+        guard let img = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
+        if let tint = tint, #available(macOS 12.0, *) {
+            return img.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [tint]))
+        }
+        img.isTemplate = true
+        return img
+    }
+
+    // Keep the bar narrow: over `max` chars, show the first `keep` + an ellipsis (full text stays in the tooltip).
+    func truncated(_ s: String, max: Int = 20, keep: Int = 18) -> String {
+        s.count > max ? String(s.prefix(keep)) + "…" : s
+    }
+
+    // Rank a session's EFFECTIVE state for surfacing (higher = more important), so a session
+    // awaiting YOUR permission is never hidden behind one merely thinking. `eff` only ever yields
+    // permission / thinking / tool / idle (done collapses to idle; waiting is never emitted).
+    func priority(of eff: String) -> Int {
+        switch eff {
+        case "permission":       return 2
+        case "thinking", "tool": return 1
+        default:                 return 0   // idle / unknown
+        }
+    }
+
+    func workingLabel(_ s: Session) -> String {
+        if !s.label.isEmpty { return s.label }
+        return s.state == "tool" ? "Working…" : "Thinking…"
+    }
+
+    // "1m 1s" / "43s" — Claude Code's elapsed-clock style.
+    func elapsed(_ secs: Int) -> String {
+        let m = secs / 60, s = secs % 60
+        return m > 0 ? "\(m)m \(s)s" : "\(s)s"
+    }
+
     @objc func quit() { NSApp.terminate(nil) }
 
     @objc func openClaude() {
@@ -278,42 +797,62 @@ final class StatusController: NSObject, NSMenuDelegate {
         }
     }
 
-    // Open the instance registry in the user's default editor, seeding a single-instance
-    // template (just the default ~/.claude) if it doesn't exist yet. Users duplicate the entry
-    // to track extra CLAUDE_CONFIG_DIR aliases. The "_comment" key is ignored by the parsers.
-    @objc func editInstances() {
-        if !FileManager.default.fileExists(atPath: registryPath) {
-            let template = """
-            {
-              "_comment": "One entry per Claude instance — each a distinct CLAUDE_CONFIG_DIR. Duplicate the Default line to track an alias, e.g. { \\"name\\": \\"Work\\", \\"configDir\\": \\"~/.claude-work\\", \\"label\\": \\"claude-work\\" }. configDir accepts ~ and $ENV. Re-run the installer (or update the app) after editing so hooks reach the new dir.",
-              "instances": [
-                { "name": "Default", "configDir": "~/.claude", "label": "default" }
-              ]
-            }
-
-            """
-            try? FileManager.default.createDirectory(atPath: statusbarDir, withIntermediateDirectories: true)
-            try? template.write(toFile: registryPath, atomically: true, encoding: .utf8)
+    // Row click. Desktop session: focus the Claude app. Do NOT use claude://resume?session=<id>,
+    // that calls importCliSession() and spawns a duplicate "ungrouped" session record
+    // (local_<random>.json with cliSessionId=<id>) every click, it's an import verb, not focus.
+    // The clean focus path (claude://code/<bridgeSessionId>) needs an opaque session_/cse_ bridge
+    // id the app never exposes to us (not in env, not derivable from the UUID, undefined on disk).
+    // CLI session: bring its terminal APP to the front (zero permission). Targeting the exact
+    // window/tab needs a one-time Automation grant, deferred to the opt-in build (issue #19).
+    func openSession(_ id: String, entrypoint: String, termProgram: String) {
+        if entrypoint == "claude-desktop" { openClaude(); return }
+        // Map TERM_PROGRAM to a name `open -a` understands; most terminals match verbatim.
+        let app: String
+        switch termProgram {
+        case "Apple_Terminal": app = "Terminal"
+        case "iTerm.app":      app = "iTerm"
+        case "vscode":         app = "Visual Studio Code"
+        case "WarpTerminal":   app = "Warp"
+        case "":               return  // unknown surface, nothing to focus
+        default:               app = termProgram  // Ghostty, WezTerm, Tabby, Hyper, kitty, …
         }
-        NSWorkspace.shared.open(URL(fileURLWithPath: registryPath))
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        p.arguments = ["-a", app]
+        try? p.run()
     }
 
-    @objc func toggleTimer() {
-        showTimer.toggle()
-        UserDefaults.standard.set(showTimer, forKey: "showTimer")
-        applyTitle()
-    }
-
-    @objc func toggleSound() {
-        playCompletionSound.toggle()
-        UserDefaults.standard.set(playCompletionSound, forKey: "completionSound")
-    }
 
     @objc func chooseColor(_ sender: NSMenuItem) {
         guard let sys = sender.representedObject as? Bool else { return }
         iconSystem = sys
         UserDefaults.standard.set(iconSystem, forKey: "iconSystem")
         evaluate() // re-render the current state in the new color
+    }
+
+    // Open the account registry in the default editor. Each entry is one CLAUDE_CONFIG_DIR; the
+    // `name` is the short alias shown in the menu. Saving triggers a reinstall (see refreshInstanceNames)
+    // so a newly-added account's hooks get wired in automatically.
+    @objc func editInstances() {
+        if !FileManager.default.fileExists(atPath: registryPath) {
+            let template = """
+            {
+              "_comment": "One entry per Claude account — each a distinct CLAUDE_CONFIG_DIR. Duplicate the Default line to track an alias, e.g. { \\"name\\": \\"Work\\", \\"configDir\\": \\"~/.claude-work\\", \\"label\\": \\"claude-work\\" }. `name` is the short label shown in the menu; configDir accepts ~ and $ENV. Hooks re-wire automatically when you save.",
+              "instances": [
+                { "name": "Default", "configDir": "~/.claude", "label": "default" }
+              ]
+            }
+
+            """
+            try? FileManager.default.createDirectory(atPath: (registryPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            try? template.write(toFile: registryPath, atomically: true, encoding: .utf8)
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: registryPath))
+    }
+
+    @objc func chooseHideIdle(_ sender: NSMenuItem) {
+        guard let secs = sender.representedObject as? Double else { return }
+        UserDefaults.standard.set(secs, forKey: "hideIdleAfter")
     }
 
     @objc func chooseStyle(_ sender: NSMenuItem) {
@@ -329,175 +868,149 @@ final class StatusController: NSObject, NSMenuDelegate {
 
     func tick() {
         checkLifecycle()
-        loadRegistry()
-        loadInstances()
+        reloadSessions()
         evaluate()
+        if menuIsOpen { refreshOpenMenuRows() }
     }
 
-    // Read instances.json (friendly names + ordering). Tolerant of a missing/invalid file.
-    func loadRegistry() {
-        guard let data = FileManager.default.contents(atPath: registryPath),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let arr = obj["instances"] as? [[String: Any]] else { return }
-        var names: [String: String] = [:]
-        var order: [String] = []
-        for it in arr {
-            guard let label = it["label"] as? String, !label.isEmpty else { continue }
-            names[label] = (it["name"] as? String) ?? label
-            order.append(label)
-        }
-        instanceNames = names
-        // Stash the registry order so evaluate()/the menu list instances predictably.
-        registryOrder = order
+    // The .json session files currently in state.d/ (ignores the .tmp files mid-write).
+    func stateFileNames() -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: stateDir)) ?? []).filter { $0.hasSuffix(".json") }
     }
-    var registryOrder: [String] = []
 
-    // Load every instance's state.json under instances/. Falls back to the legacy top-level
-    // state.json (as a synthetic "default") so the bar isn't blank right after an upgrade.
-    func loadInstances() {
+    // Refresh `sessions` from state.d/, re-parsing only files whose mtime changed (writes are
+    // atomic renames, so a content update bumps mtime and is never read torn).
+    // Map instance label -> friendly alias from instances.json (e.g. "claude-lf" -> "LF"), re-read only
+    // when the file changes so it's cheap to call every tick. Edits to the registry show on the next tick.
+    func refreshInstanceNames() {
         let fm = FileManager.default
-        var found: [String: [String: Any]] = [:]
-        var discovered: [String] = []
-        if let labels = try? fm.contentsOfDirectory(atPath: instancesDir) {
-            for label in labels.sorted() {
-                let sp = (instancesDir as NSString).appendingPathComponent("\(label)/state.json")
-                if let data = fm.contents(atPath: sp),
-                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    found[label] = obj
-                    discovered.append(label)
+        guard let attrs = try? fm.attributesOfItem(atPath: registryPath),
+              let m = attrs[.modificationDate] as? Date else { instanceNames = [:]; registryMTime = nil; return }
+        if registryMTime == m { return }
+        let firstLoad = registryMTime == nil
+        registryMTime = m
+        var map: [String: String] = [:]
+        if let data = fm.contents(atPath: registryPath),
+           let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let arr = j["instances"] as? [[String: Any]] {
+            for e in arr {
+                if let label = e["label"] as? String, let name = e["name"] as? String, !name.isEmpty {
+                    map[label] = name
                 }
             }
         }
-        if found.isEmpty,
-           let data = fm.contents(atPath: legacyStatePath),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            found["default"] = obj
-            discovered = ["default"]
-        }
-        instances = found
-        // Registry order first (only labels we actually found), then any extras discovered.
-        instanceOrder = registryOrder.filter { found[$0] != nil }
-            + discovered.filter { !registryOrder.contains($0) }
+        instanceNames = map
+        // A registry edit (new/renamed account) means hooks may need wiring into a new config dir.
+        // Re-run the installer on real changes, not the initial load (launch already handles that).
+        if !firstLoad { runInstaller() }
     }
 
-    struct Eff { let state: String; let label: String; let started: Double; let ts: Double }
-
-    // Resolve one instance's raw state into its effective state, applying the same recovery
-    // rules the single-instance path used (Esc-interrupt marker + a 900s safety net).
-    func effective(_ s: [String: Any]) -> Eff {
-        let state = s["state"] as? String ?? "idle"
-        var label = s["label"] as? String ?? ""
-        let ts = (s["ts"] as? NSNumber)?.doubleValue ?? 0
-        let started = (s["startedAt"] as? NSNumber)?.doubleValue ?? 0
-        let age = Date().timeIntervalSince1970 - ts
-        var eff = state
-        // Stop fires on normal completion but NOT on an Esc interrupt or a denied permission
-        // prompt: Claude Code writes "[Request interrupted by user]" to the transcript and ends
-        // with no hook, freezing state.json. Recover off that marker. (Force-quit writes no
-        // marker; lifecycle.js handles that case.) Full rationale in CLAUDE.md.
-        if state == "thinking" || state == "tool" || state == "permission" {
-            if age > 900 { eff = "idle"; label = "" } // absolute safety net
-            else if let tr = s["transcript"] as? String,
-                    let last = lastLine(ofFileAt: tr),
-                    last.contains("interrupted by user") {
-                eff = "idle"; label = ""
-            }
+    func reloadSessions() {
+        refreshInstanceNames()
+        let fm = FileManager.default
+        let files = stateFileNames()
+        let present = Set(files)
+        for key in Array(fileMTimes.keys) where !present.contains(key) {
+            fileMTimes[key] = nil
+            sessions[(key as NSString).deletingPathExtension] = nil
         }
-        return Eff(state: eff, label: label, started: started, ts: ts)
-    }
-
-    // Higher wins the single menu-bar slot: an instance awaiting you outranks one merely
-    // working, which outranks one that just finished, which outranks idle.
-    func priority(_ state: String) -> Int {
-        switch state {
-        case "permission": return 3
-        case "tool", "thinking": return 2
-        case "done": return 1
-        default: return 0
-        }
-    }
-
-    func shortName(_ label: String) -> String { instanceNames[label] ?? label }
-
-    // One-line status used in the dropdown's Instances section.
-    func rowStatus(_ e: Eff) -> String {
-        switch e.state {
-        case "permission": return "Awaiting permission"
-        case "tool": return e.label.isEmpty ? "Working…" : e.label
-        case "thinking": return e.label.isEmpty ? "Thinking…" : e.label
-        case "done": return "Done"
-        default: return "Idle"
+        for f in files {
+            let full = (stateDir as NSString).appendingPathComponent(f)
+            guard let attrs = try? fm.attributesOfItem(atPath: full),
+                  let m = attrs[.modificationDate] as? Date else { continue }
+            if fileMTimes[f] == m { continue }
+            fileMTimes[f] = m
+            guard let data = fm.contents(atPath: full),
+                  let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            let id = (f as NSString).deletingPathExtension
+            sessions[id] = Session(json: o, id: id)
         }
     }
 
     func evaluate() {
-        // Per-instance completion-sound bookkeeping: chime once when any instance's turn that
-        // ran >= 1 min transitions to "done".
-        for (label, raw) in instances {
-            let e = effective(raw)
-            if (e.state == "thinking" || e.state == "tool"), e.started > 0 { lastTurnStartByLabel[label] = e.started }
-            if e.state == "done", (prevEffByLabel[label] ?? "") != "done", playCompletionSound,
-               let lts = lastTurnStartByLabel[label], lts > 0,
-               Date().timeIntervalSince1970 - lts >= 60 {
-                completionSound?.play()
+        let now = Date().timeIntervalSince1970
+        var chime = false
+
+        for id in Array(sessions.keys) {
+            guard var s = sessions[id] else { continue }
+            s.eff = effectiveState(s, now: now)   // compute once per tick; the menu + tooltip reuse it
+            // Reap on PROCESS death, not idle time: a session leaves only when its `claude` process is
+            // gone (closed/crashed terminal, quit app), so an idle-but-open session stays and the icon
+            // holds. Pre-upgrade files have no pid (0) — fall back to the old idle+age prune so they
+            // can't linger forever. This is also what keeps state.d self-cleaning (no growing cache).
+            let dead = s.pid > 0 ? !pidAlive(s.pid)
+                                 : (s.eff == "idle" && stalePruneAge > 0 && now - s.ts > stalePruneAge)
+            if dead {
+                try? FileManager.default.removeItem(atPath: (stateDir as NSString).appendingPathComponent(id + ".json"))
+                sessions[id] = nil; fileMTimes[id + ".json"] = nil; soundPrev[id] = nil; turnStart[id] = nil
+                continue
             }
-            if e.state == "done" { lastTurnStartByLabel[label] = 0 }
-            prevEffByLabel[label] = e.state
+            sessions[id] = s
+            if soundEdgeDone(s, now: now) { chime = true }
         }
-        // Drop bookkeeping for instances that vanished.
-        for label in Array(prevEffByLabel.keys) where instances[label] == nil {
-            prevEffByLabel[label] = nil; lastTurnStartByLabel[label] = nil
-        }
+        for id in Array(soundPrev.keys) where sessions[id] == nil { soundPrev[id] = nil; turnStart[id] = nil }
+        if chime, playCompletionSound { completionSound?.play() }
 
-        // Pick the "combined" winner: highest priority, ties broken by most recent activity.
-        var winnerLabel: String?
-        var winner: Eff?
-        for label in instanceOrder {
-            guard let raw = instances[label] else { continue }
-            let e = effective(raw)
-            if let w = winner {
-                let p = priority(e.state), wp = priority(w.state)
-                if p > wp || (p == wp && e.ts > w.ts) { winner = e; winnerLabel = label }
-            } else {
-                winner = e; winnerLabel = label
-            }
+        // Surface the single highest-priority session (permission > working > …); ties broken by
+        // recency, so within a tier the most recently active session wins.
+        let lead = sessions.values.max { a, b in
+            let pa = priority(of: a.eff), pb = priority(of: b.eff)
+            return pa == pb ? a.ts < b.ts : pa < pb
         }
+        statusItem.button?.toolTip = lead.map(sessionMenuLine)  // names repo + surface + state on hover
 
-        guard let e = winner, let wl = winnerLabel else {
-            render(label: "", color: iconColor, animate: false, startedAt: 0)
-            return
-        }
-        // Prefix the winner's short name only when more than one instance exists and it's
-        // doing something worth attributing.
-        let prefix = (instances.count > 1 && priority(e.state) > 0) ? "\(shortName(wl)) " : ""
-
-        switch e.state {
-        case "thinking":  render(label: prefix + (e.label.isEmpty ? "Thinking…" : e.label), color: iconColor, animate: true,  startedAt: e.started)
-        case "tool":      render(label: prefix + (e.label.isEmpty ? "Working…"  : e.label), color: iconColor, animate: true,  startedAt: e.started)
-        case "permission":render(label: prefix + "Awaiting permission", color: amber, animate: false, startedAt: 0, dot: true)
-        default:          render(label: "", color: iconColor, animate: false, startedAt: 0) // done + idle: just the orange spark
+        guard let lead = lead else { renderResting(); return }
+        switch lead.eff {
+        case "permission":
+            render(label: statusText(lead, eff: lead.eff), color: amber, animate: false, startedAt: 0, dot: true)
+        case "thinking", "tool":
+            render(label: statusText(lead, eff: lead.eff), color: iconColor, animate: true, startedAt: lead.startedAt)
+        default:
+            renderResting()
         }
     }
 
-    // MARK: self-quit lifecycle (rationale + warmup-churn history in CLAUDE.md)
+    func renderResting() { render(label: "", color: iconColor, animate: false, startedAt: 0) }
+
+    // Per-session effective state with two recovery nets: an absolute age cap, plus the transcript
+    // "interrupted by user" marker (Esc / denied permission fire no hook, freezing the file). "done"
+    // collapses to rest.
+    func effectiveState(_ s: Session, now: Double) -> String {
+        if s.state == "thinking" || s.state == "tool" || s.state == "permission" {
+            let cap: Double = s.state == "permission" ? 7200 : 900
+            if now - s.ts > cap { return "idle" }
+            if !s.transcript.isEmpty, let last = lastTurnLine(ofFileAt: s.transcript),
+               last.contains("interrupted by user") { return "idle" }
+            return s.state
+        }
+        return s.state == "done" ? "idle" : s.state
+    }
+
+    // Detect a session's working->done edge for the chime (turns >= 1 min only). Updates the
+    // per-session bookkeeping every call and returns true exactly once per qualifying edge.
+    func soundEdgeDone(_ s: Session, now: Double) -> Bool {
+        let prev = soundPrev[s.id] ?? ""
+        if s.state == "thinking" || s.state == "tool", s.startedAt > 0 { turnStart[s.id] = s.startedAt }
+        var edge = false
+        if s.state == "done", prev != "done", let st = turnStart[s.id], st > 0, now - st >= 60 { edge = true }
+        if s.state == "done" { turnStart[s.id] = 0 }
+        soundPrev[s.id] = s.state
+        return edge
+    }
+
+    // MARK: self-quit lifecycle
 
     func claudeDesktopRunning() -> Bool {
         NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == claudeDesktopBundleID }
     }
 
-    // Total live sessions across every instance (each is one file in its sessions.d/),
-    // plus the legacy top-level sessions.d as a fallback during the upgrade window.
-    func sessionCount() -> Int {
-        let fm = FileManager.default
-        var n = 0
-        if let labels = try? fm.contentsOfDirectory(atPath: instancesDir) {
-            for label in labels {
-                let sd = (instancesDir as NSString).appendingPathComponent("\(label)/sessions.d")
-                n += (try? fm.contentsOfDirectory(atPath: sd).count) ?? 0
-            }
-        }
-        n += (try? fm.contentsOfDirectory(atPath: legacySessionsDir).count) ?? 0
-        return n
+    func sessionCount() -> Int { stateFileNames().count }
+
+    // Liveness probe: is this session's `claude` process still alive? kill(pid,0) returns 0 if the
+    // process exists; EPERM = exists but not ours (won't happen, same user); ESRCH = gone.
+    func pidAlive(_ pid: Int32) -> Bool {
+        if pid <= 0 { return false }
+        return kill(pid, 0) == 0 || errno == EPERM
     }
 
     // Stay while Claude desktop is open OR a session is active; otherwise quit after a
@@ -525,6 +1038,21 @@ final class StatusController: NSObject, NSMenuDelegate {
         try? fh.seek(toOffset: size > chunk ? size - chunk : 0)
         guard let data = try? fh.readToEnd(), let s = String(data: data, encoding: .utf8) else { return nil }
         return s.split(separator: "\n").last { !$0.isEmpty }.map(String.init)
+    }
+
+    // Last actual turn line (a user/assistant message), ignoring the bookkeeping lines Claude Code
+    // appends after an interrupt (system/away_summary, last-prompt, ai-title, mode, permission-mode).
+    // Those would otherwise hide the "interrupted by user" marker and freeze the amber dot.
+    func lastTurnLine(ofFileAt path: String) -> String? {
+        guard let fh = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? fh.close() }
+        let size = (try? fh.seekToEnd()) ?? 0
+        let chunk: UInt64 = 8192
+        try? fh.seek(toOffset: size > chunk ? size - chunk : 0)
+        guard let data = try? fh.readToEnd(), let s = String(data: data, encoding: .utf8) else { return nil }
+        return s.split(separator: "\n").last {
+            $0.contains("\"type\":\"user\"") || $0.contains("\"type\":\"assistant\"")
+        }.map(String.init)
     }
 
     // MARK: render
@@ -561,9 +1089,7 @@ final class StatusController: NSObject, NSMenuDelegate {
         guard let button = statusItem.button else { return }
         var text = activeBase
         if showTimer, startedAt > 0 {
-            let secs = max(0, Int(Date().timeIntervalSince1970 - startedAt))
-            let m = secs / 60, s = secs % 60
-            text += "  " + (m > 0 ? "\(m)m \(s)s" : "\(s)s") // Claude Code style: "1m 1s" / "43s"
+            text += "  " + elapsed(max(0, Int(Date().timeIntervalSince1970 - startedAt)))
         }
         if text.isEmpty {
             button.imagePosition = .imageOnly
@@ -589,7 +1115,7 @@ final class StatusController: NSObject, NSMenuDelegate {
 
     func iconImage(color: NSColor?, frame: Int) -> NSImage {
         if animStyle == .web { return tint(frames, color: color, frame: frame) }
-        if animStyle == .crab { return crabIcon(frame: frame) }
+        if animStyle == .crab { return crabIcon(color: color, frame: frame) }
         let i = (frame / codeSub) % codeGlyphs.count
         let local = (CGFloat(frame % codeSub) + 0.5) / CGFloat(codeSub) // 0…1 within this glyph
         // Scale envelope per glyph: rise, hold at peak, fall, so each lands before the swap.
@@ -653,14 +1179,16 @@ final class StatusController: NSObject, NSMenuDelegate {
 
     let logoSet: [NSImage] = Data(base64Encoded: claudeLogoPNG).flatMap(NSImage.init(data:)).map { [$0] } ?? []
     func restingIcon(color: NSColor?) -> NSImage {
-        if animStyle == .crab { return crabIcon(frame: 0) }
+        if animStyle == .crab { return crabIcon(color: color, frame: 0) }
         return tint(logoSet.isEmpty ? frames : logoSet, color: color, frame: 0)
     }
 
-    // Full color (isTemplate=false), so the Orange/System color setting does NOT apply here.
-    func crabIcon(frame: Int) -> NSImage {
+    // nil color (System) => adaptive shaded template (see adaptiveCrabFrame in CrabRender.swift);
+    // non-nil (Orange) => the original full-color sprite, drawn as-is.
+    func crabIcon(color: NSColor?, frame: Int) -> NSImage {
         guard !crabFrames.isEmpty else { return NSImage(size: NSSize(width: 18, height: 18)) }
-        let src = crabFrames[frame % crabFrames.count]
+        let pool = color == nil ? crabTemplateFrames : crabFrames
+        let src = pool[frame % pool.count]
         let rep = src.representations.first
         let pw = CGFloat(rep?.pixelsWide ?? Int(src.size.width))
         let ph = CGFloat(rep?.pixelsHigh ?? Int(src.size.height))
@@ -669,7 +1197,7 @@ final class StatusController: NSObject, NSMenuDelegate {
             src.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
             return true
         }
-        img.isTemplate = false
+        img.isTemplate = (color == nil)
         return img
     }
 
