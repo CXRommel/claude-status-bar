@@ -3,6 +3,18 @@
 All notable changes to Claude Status Bar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] - 2026-07-02
+
+### Added
+- Thinking words: the menu bar now rotates through playful verbs while working, more like Claude Code. On by default; toggle it in the menu.
+
+### Changed
+- Condensed the settings into a single Settings menu.
+- Completion sound now chimes only after turns longer than 5 minutes (was 1 minute).
+
+### Known issues
+- Upstream Claude Code bug: pressing Ctrl+C during the reasoning phase in the terminal can leave the icon stuck on a thinking word, since Claude Code emits no hook or transcript signal for that interrupt. Sending your next prompt clears it.
+
 ## [0.3.1] - 2026-06-28
 
 ### Fixed
@@ -96,6 +108,7 @@ All notable changes to Claude Status Bar are documented here. This project follo
 - Signed and notarized DMG so it opens without a Gatekeeper warning.
 - Claude Code plugin marketplace manifest for the plugin install path.
 
+[0.3.2]: https://github.com/m1ckc3s/claude-status-bar/releases/tag/v0.3.2
 [0.3.1]: https://github.com/m1ckc3s/claude-status-bar/releases/tag/v0.3.1
 [0.3.0]: https://github.com/m1ckc3s/claude-status-bar/releases/tag/v0.3.0
 [0.2.2]: https://github.com/m1ckc3s/claude-status-bar/releases/tag/v0.2.2

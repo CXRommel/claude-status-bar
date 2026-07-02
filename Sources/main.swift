@@ -239,7 +239,7 @@ final class StatusController: NSObject, NSMenuDelegate {
     var sessions: [String: Session] = [:]  // id -> latest parsed per-session state
     var fileMTimes: [String: Date] = [:]   // "<id>.json" -> last-parsed mtime (re-parse only on change)
     var soundPrev: [String: String] = [:]  // id -> previous raw state (completion-sound edge)
-    var turnStart: [String: Double] = [:]  // id -> active turn start (1-min sound gate)
+    var turnStart: [String: Double] = [:]  // id -> active turn start (5-min sound gate)
     var menuIsOpen = false                  // refresh the dropdown's per-session timers only while open
     var sessionMenuItems: [(item: NSMenuItem, id: String)] = []
     var activeBase = ""        // label without the elapsed clock
@@ -255,7 +255,36 @@ final class StatusController: NSObject, NSMenuDelegate {
     var animStyle: AnimStyle = .web
     var showTimer = false
     var iconSystem = false // false = brand Orange; true = adaptive black/white (template image)
-    var playCompletionSound = false // chime when a turn longer than ~1 min finishes
+    var playCompletionSound = false // chime when a turn longer than ~5 min finishes
+    var useThinkingWords = true     // rotate a playful verb ("Manifesting…") in place of "Thinking…"
+    var sessionWord: [String: String] = [:] // id -> current thinking word; re-picked on each entry into "thinking"
+    // Claude Code's SPINNER_VERBS, minus the hyphenated/tongue-twister ones. Longest kept is ~14 chars
+    // ("Hullaballooing"/"Metamorphosing"); with the timer showing they can get wide in a crowded menu bar.
+    let thinkingWords = [
+        "Accomplishing", "Actioning", "Actualizing", "Architecting", "Baking", "Beaming", "Beboppin'",
+        "Befuddling", "Billowing", "Blanching", "Bloviating", "Boogieing", "Boondoggling", "Booping",
+        "Bootstrapping", "Brewing", "Bunning", "Burrowing", "Calculating", "Canoodling", "Caramelizing",
+        "Cascading", "Catapulting", "Cerebrating", "Channeling", "Channelling", "Churning", "Clauding",
+        "Coalescing", "Cogitating", "Combobulating", "Composing", "Computing", "Concocting", "Considering",
+        "Contemplating", "Cooking", "Crafting", "Creating", "Crunching", "Crystallizing", "Cultivating",
+        "Deciphering", "Deliberating", "Determining", "Doing", "Doodling", "Drizzling", "Ebbing",
+        "Effecting", "Elucidating", "Embellishing", "Enchanting", "Envisioning", "Evaporating", "Fermenting",
+        "Finagling", "Flambéing", "Flowing", "Flummoxing", "Fluttering", "Forging", "Forming", "Frolicking",
+        "Gallivanting", "Galloping", "Garnishing", "Generating", "Gesticulating", "Germinating", "Gitifying",
+        "Grooving", "Gusting", "Harmonizing", "Hashing", "Hatching", "Herding", "Honking", "Hullaballooing",
+        "Hyperspacing", "Ideating", "Imagining", "Improvising", "Incubating", "Inferring", "Infusing",
+        "Ionizing", "Jitterbugging", "Julienning", "Kneading", "Leavening", "Levitating", "Lollygagging",
+        "Manifesting", "Marinating", "Meandering", "Metamorphosing", "Misting", "Moonwalking", "Moseying",
+        "Mulling", "Mustering", "Musing", "Nebulizing", "Nesting", "Noodling", "Nucleating", "Orbiting",
+        "Orchestrating", "Osmosing", "Perambulating", "Percolating", "Perusing", "Pollinating", "Pondering",
+        "Pontificating", "Pouncing", "Precipitating", "Processing", "Proofing", "Propagating", "Puttering",
+        "Puzzling", "Quantumizing", "Razzmatazzing", "Reticulating", "Roosting", "Ruminating", "Sautéing",
+        "Scampering", "Schlepping", "Scurrying", "Seasoning", "Shenaniganing", "Shimmying", "Simmering",
+        "Skedaddling", "Sketching", "Slithering", "Smooshing", "Spelunking", "Spinning", "Sprouting",
+        "Stewing", "Sublimating", "Swirling", "Swooping", "Symbioting", "Synthesizing", "Tempering",
+        "Thinking", "Thundering", "Tinkering", "Tomfoolering", "Transfiguring", "Transmuting", "Twisting",
+        "Undulating", "Unfurling", "Unravelling", "Vibing", "Waddling", "Wandering", "Warping",
+        "Whirlpooling", "Whirring", "Whisking", "Wibbling", "Working", "Wrangling", "Zesting", "Zigzagging"]
     lazy var completionSound: NSSound? = {
         guard let p = Bundle.main.path(forResource: "completion", ofType: "mp3"),
               let s = NSSound(contentsOfFile: p, byReference: true) else { return nil }
@@ -295,6 +324,7 @@ final class StatusController: NSObject, NSMenuDelegate {
         if d.object(forKey: "showTimer") != nil { showTimer = d.bool(forKey: "showTimer") }
         if d.object(forKey: "iconSystem") != nil { iconSystem = d.bool(forKey: "iconSystem") }
         if d.object(forKey: "completionSound") != nil { playCompletionSound = d.bool(forKey: "completionSound") }
+        if d.object(forKey: "thinkingWords") != nil { useThinkingWords = d.bool(forKey: "thinkingWords") }
         if let s = d.string(forKey: "animStyle"), let st = AnimStyle(rawValue: s) { animStyle = st }
         let menu = NSMenu()
         menu.delegate = self
@@ -492,54 +522,56 @@ final class StatusController: NSObject, NSMenuDelegate {
             menu.addItem(.separator())
         }
 
-        menu.addItem(header("Options"))
-
         menu.addItem(toggleRow(title: "Show timer", isOn: showTimer) { [weak self] on in
             self?.showTimer = on
             UserDefaults.standard.set(on, forKey: "showTimer")
             self?.applyTitle()
         })
-        menu.addItem(toggleRow(title: "Completion sound (1m+)", isOn: playCompletionSound) { [weak self] on in
+        menu.addItem(toggleRow(title: "Completion sound", qualifier: "5min+", isOn: playCompletionSound) { [weak self] on in
             self?.playCompletionSound = on
             UserDefaults.standard.set(on, forKey: "completionSound")
         })
+        menu.addItem(toggleRow(title: "Thinking words", isOn: useThinkingWords) { [weak self] on in
+            self?.useThinkingWords = on
+            UserDefaults.standard.set(on, forKey: "thinkingWords")
+            self?.evaluate()   // re-render the bar label immediately with/without the rotating word
+        })
 
-        let animParent = NSMenuItem(title: "Animation Style", action: nil, keyEquivalent: "")
-        let animSub = NSMenu()
+        // One "Settings" fly-out holding every set-once picker, grouped by section headers, so the
+        // main menu stays focused on the live sessions + quick toggles instead of three separate submenus.
+        let settingsParent = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
+        let settingsSub = NSMenu()
+
+        settingsSub.addItem(header("Animation Style"))
         for (style, name) in [(AnimStyle.web, "Claude Spark"), (AnimStyle.code, "Claude Code"), (AnimStyle.crab, "Crab Walking")] {
             let it = NSMenuItem(title: name, action: #selector(chooseStyle(_:)), keyEquivalent: "")
             it.target = self
             it.representedObject = style.rawValue
             it.state = animStyle == style ? .on : .off
-            animSub.addItem(it)
+            settingsSub.addItem(it)
         }
-        animParent.submenu = animSub
-        menu.addItem(animParent)
 
-        let colorParent = NSMenuItem(title: "Color theme", action: nil, keyEquivalent: "")
-        let colorSub = NSMenu()
+        settingsSub.addItem(header("Color Theme"))
         for (sys, name) in [(false, "Orange"), (true, "System")] {
             let it = NSMenuItem(title: name, action: #selector(chooseColor(_:)), keyEquivalent: "")
             it.target = self
             it.representedObject = sys
             it.state = iconSystem == sys ? .on : .off
-            colorSub.addItem(it)
+            settingsSub.addItem(it)
         }
-        colorParent.submenu = colorSub
-        menu.addItem(colorParent)
 
-        let hideParent = NSMenuItem(title: "Hide idle sessions", action: nil, keyEquivalent: "")
-        let hideSub = NSMenu()
+        settingsSub.addItem(header("Hide Idle Sessions"))
         let curHide = stalePruneAge
         for (name, secs) in [("5 minutes", 300.0), ("15 minutes", 900.0), ("30 minutes", 1800.0), ("1 hour", 3600.0), ("Never", 0.0)] {
             let it = NSMenuItem(title: name, action: #selector(chooseHideIdle(_:)), keyEquivalent: "")
             it.target = self
             it.representedObject = secs
             it.state = curHide == secs ? .on : .off
-            hideSub.addItem(it)
+            settingsSub.addItem(it)
         }
-        hideParent.submenu = hideSub
-        menu.addItem(hideParent)
+
+        settingsParent.submenu = settingsSub
+        menu.addItem(settingsParent)
 
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Version \(currentVersion)", action: nil, keyEquivalent: ""))
@@ -560,18 +592,15 @@ final class StatusController: NSObject, NSMenuDelegate {
         return it
     }
 
-    func toggleRow(title: String, isOn: Bool, onToggle: @escaping (Bool) -> Void) -> NSMenuItem {
+    func toggleRow(title: String, qualifier: String? = nil, isOn: Bool, onToggle: @escaping (Bool) -> Void) -> NSMenuItem {
         let width = CGFloat(uiConfig()["boxWidth"] ?? 300), height: CGFloat = 24, leftInset: CGFloat = 14, rightInset: CGFloat = 12
         let row = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         row.autoresizingMask = [.width]
 
-        // Dim a trailing parenthetical (e.g. the "(1m+)" qualifier) so it reads as a secondary note.
         let labelFont = NSFont.menuFont(ofSize: 0)
-        let attr = NSMutableAttributedString(string: title, attributes: [.font: labelFont, .foregroundColor: NSColor.labelColor])
-        if let r = title.range(of: " (") {
-            attr.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: NSRange(r.lowerBound..<title.endIndex, in: title))
-        }
-        let label = NSTextField(labelWithAttributedString: attr)
+        let label = NSTextField(labelWithString: title)
+        label.font = labelFont
+        label.textColor = .labelColor
         label.sizeToFit()
         label.setFrameOrigin(NSPoint(x: leftInset, y: (height - label.frame.height) / 2))
         label.autoresizingMask = [.maxXMargin]
@@ -579,9 +608,23 @@ final class StatusController: NSObject, NSMenuDelegate {
 
         let toggle = ToggleView(isOn: isOn)
         toggle.onToggle = onToggle
-        toggle.setFrameOrigin(NSPoint(x: width - toggle.frame.width - rightInset, y: (height - toggle.frame.height) / 2))
+        let toggleX = width - toggle.frame.width - rightInset
+        toggle.setFrameOrigin(NSPoint(x: toggleX, y: (height - toggle.frame.height) / 2))
         toggle.autoresizingMask = [.minXMargin]
         row.addSubview(toggle)
+
+        // Optional trailing qualifier ("5 min+") pinned just left of the toggle, in the SAME font/size/color
+        // and right-alignment as the session-row timer, so the two read as the same kind of trailing note.
+        if let qualifier = qualifier {
+            let qW: CGFloat = 74, gap: CGFloat = 8
+            let q = NSTextField(labelWithString: qualifier)
+            q.font = NSFont.monospacedSystemFont(ofSize: labelFont.pointSize - 2, weight: .regular)
+            q.textColor = .secondaryLabelColor
+            q.alignment = .right
+            q.frame = NSRect(x: toggleX - gap - qW, y: (height - 16) / 2, width: qW, height: 16)
+            q.autoresizingMask = [.minXMargin]
+            row.addSubview(q)
+        }
 
         let item = NSMenuItem()
         item.view = row
@@ -758,8 +801,20 @@ final class StatusController: NSObject, NSMenuDelegate {
     }
 
     func workingLabel(_ s: Session) -> String {
+        if useThinkingWords, s.state == "thinking", let w = sessionWord[s.id], !w.isEmpty { return w + "…" }
         if !s.label.isEmpty { return s.label }
         return s.state == "tool" ? "Working…" : "Thinking…"
+    }
+
+    // Re-pick a word each time a session ENTERS the thinking state (prompt, or a tool->thinking `post`),
+    // avoiding an immediate repeat, so a tool round-trip lands a different word. Held steady while the
+    // session stays thinking. Computed regardless of the toggle so flipping it on shows instantly.
+    func updateThinkingWord(_ s: Session) {
+        let prev = soundPrev[s.id] ?? ""
+        guard s.state == "thinking", prev != "thinking" else { return }
+        var w = thinkingWords.randomElement() ?? "Thinking"
+        if thinkingWords.count > 1 { while w == sessionWord[s.id] { w = thinkingWords.randomElement() ?? w } }
+        sessionWord[s.id] = w
     }
 
     // "1m 1s" / "43s" — Claude Code's elapsed-clock style.
@@ -876,13 +931,14 @@ final class StatusController: NSObject, NSMenuDelegate {
                                  : (s.eff == "idle" && stalePruneAge > 0 && now - s.ts > stalePruneAge)
             if dead {
                 try? FileManager.default.removeItem(atPath: (stateDir as NSString).appendingPathComponent(id + ".json"))
-                sessions[id] = nil; fileMTimes[id + ".json"] = nil; soundPrev[id] = nil; turnStart[id] = nil
+                sessions[id] = nil; fileMTimes[id + ".json"] = nil; soundPrev[id] = nil; turnStart[id] = nil; sessionWord[id] = nil
                 continue
             }
             sessions[id] = s
+            updateThinkingWord(s)   // must run before soundEdgeDone, which overwrites soundPrev[id]
             if soundEdgeDone(s, now: now) { chime = true }
         }
-        for id in Array(soundPrev.keys) where sessions[id] == nil { soundPrev[id] = nil; turnStart[id] = nil }
+        for id in Array(soundPrev.keys) where sessions[id] == nil { soundPrev[id] = nil; turnStart[id] = nil; sessionWord[id] = nil }
         if chime, playCompletionSound { completionSound?.play() }
 
         // Surface the single highest-priority session (permission > working > …); ties broken by
@@ -920,13 +976,13 @@ final class StatusController: NSObject, NSMenuDelegate {
         return s.state == "done" ? "idle" : s.state
     }
 
-    // Detect a session's working->done edge for the chime (turns >= 1 min only). Updates the
+    // Detect a session's working->done edge for the chime (turns >= 5 min only). Updates the
     // per-session bookkeeping every call and returns true exactly once per qualifying edge.
     func soundEdgeDone(_ s: Session, now: Double) -> Bool {
         let prev = soundPrev[s.id] ?? ""
         if s.state == "thinking" || s.state == "tool", s.startedAt > 0 { turnStart[s.id] = s.startedAt }
         var edge = false
-        if s.state == "done", prev != "done", let st = turnStart[s.id], st > 0, now - st >= 60 { edge = true }
+        if s.state == "done", prev != "done", let st = turnStart[s.id], st > 0, now - st >= 300 { edge = true }
         if s.state == "done" { turnStart[s.id] = 0 }
         soundPrev[s.id] = s.state
         return edge
