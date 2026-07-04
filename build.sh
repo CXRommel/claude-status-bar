@@ -55,8 +55,11 @@ cp assets/completion.mp3 "$APP/Contents/Resources/completion.mp3"
 TEAM_ID="W9JZ4932LA"
 NOTARY_PROFILE="${NOTARY_PROFILE:-claude-statusbar}"
 
+# `|| true` so a missing Developer ID cert (grep matches nothing → nonzero, which `set -eo pipefail`
+# would otherwise treat as a fatal error) falls through to the ad-hoc dev build below instead of
+# aborting the whole script.
 SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null \
-  | grep "Developer ID Application" | grep "$TEAM_ID" | head -1 | sed -E 's/.*"(.*)"/\1/')"
+  | grep "Developer ID Application" | grep "$TEAM_ID" | head -1 | sed -E 's/.*"(.*)"/\1/')" || true
 
 # Strip extended attributes (Finder info, quarantine, etc.) that bundled resources can
 # carry — codesign rejects them ("resource fork, Finder information, ... not allowed").
