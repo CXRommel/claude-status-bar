@@ -103,6 +103,7 @@ final class SessionRowView: NSView {
     let id: String
     var onClick: (() -> Void)?
     private let iconView = NSImageView()
+    private let spinner = NSProgressIndicator()
     private let nameField = NSTextField(labelWithString: "")
     private let timerField = NSTextField(labelWithString: "")
     private let pillView = NSImageView()
@@ -127,6 +128,14 @@ final class SessionRowView: NSView {
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.autoresizingMask = [.maxXMargin]
         addSubview(iconView)
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isIndeterminate = true
+        spinner.isDisplayedWhenStopped = false
+        spinner.frame = iconView.frame
+        spinner.autoresizingMask = [.maxXMargin]
+        spinner.isHidden = true
+        addSubview(spinner)
         nameField.font = .menuFont(ofSize: 0)
         nameField.textColor = .labelColor
         nameField.lineBreakMode = .byTruncatingTail
@@ -144,14 +153,21 @@ final class SessionRowView: NSView {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func setIcon(_ img: NSImage?) { iconView.image = img }
-
-    func configure(icon: NSImage?, iconTint: NSColor?, name: String, timer: String?,
+    func configure(icon: NSImage?, iconTint: NSColor?, spinning: Bool, name: String, timer: String?,
                    pillNormal: NSImage?, pillSelected: NSImage?, pillInset: CGFloat, timerGap: CGFloat) {
         let w = bounds.width
         iconView.image = icon
         iconBaseTint = iconTint
         iconView.contentTintColor = hovered ? .white : iconTint
+        if spinning {
+            iconView.isHidden = true
+            spinner.isHidden = false
+            spinner.startAnimation(nil)
+        } else {
+            spinner.stopAnimation(nil)
+            spinner.isHidden = true
+            iconView.isHidden = false
+        }
         nameField.stringValue = name
         self.pillNormal = pillNormal; self.pillSelected = pillSelected
         let pill = hovered ? pillSelected : pillNormal
@@ -200,8 +216,6 @@ final class StatusController: NSObject, NSMenuDelegate {
 
     var pollTimer: Timer?
     var animTimer: Timer?
-    var spinTimer: Timer?      // rotates the working-state spinner while the menu is open
-    var spinAngle: CGFloat = 0
     var frameIdx = 0
 
     let launchedAt = Date()
@@ -211,7 +225,7 @@ final class StatusController: NSObject, NSMenuDelegate {
     // "Hide idle after" setting (seconds): hide a resting session's ROW once it's been quiet this long.
     // Render-only — it never deletes the file or affects liveness (that's pid-driven now), and the
     // most-recent session is always kept visible (floor at one). 0 = Never. Defaults to 30 min.
-    var stalePruneAge: TimeInterval { UserDefaults.standard.object(forKey: "hideIdleAfter") as? Double ?? 1800 }
+    var stalePruneAge: TimeInterval { UserDefaults.standard.object(forKey: "hideIdleAfter") as? Double ?? 900 }
 
     struct Session {
         var id: String, state: String, label: String, project: String, instance: String, transcript: String
@@ -242,8 +256,7 @@ final class StatusController: NSObject, NSMenuDelegate {
     var fileMTimes: [String: Date] = [:]   // "<id>.json" -> last-parsed mtime (re-parse only on change)
     var instanceNames: [String: String] = [:]  // instance label -> friendly alias from instances.json
     var registryMTime: Date?                    // instances.json mtime (re-read only on change)
-    var soundPrev: [String: String] = [:]  // id -> previous raw state (completion-sound edge)
-    var turnStart: [String: Double] = [:]  // id -> active turn start (1-min sound gate)
+    var prevState: [String: String] = [:]  // id -> previous raw state per session
     var menuIsOpen = false                  // refresh the dropdown's per-session timers only while open
     var sessionMenuItems: [(item: NSMenuItem, id: String)] = []
     var activeBase = ""        // label without the elapsed clock
@@ -259,13 +272,35 @@ final class StatusController: NSObject, NSMenuDelegate {
     var animStyle: AnimStyle = .web
     var showTimer = false
     var iconSystem = false // false = brand Orange; true = adaptive black/white (template image)
-    var playCompletionSound = false // chime when a turn longer than ~1 min finishes
-    lazy var completionSound: NSSound? = {
-        guard let p = Bundle.main.path(forResource: "completion", ofType: "mp3"),
-              let s = NSSound(contentsOfFile: p, byReference: true) else { return nil }
-        s.volume = 0.7 // the clip is loud at full system volume; play it a bit softer
-        return s
-    }()
+    var useThinkingWords = true     // rotate a playful verb ("Manifesting…") in place of "Thinking…"
+    var sessionWord: [String: String] = [:] // id -> current thinking word; re-picked on each entry into "thinking"
+    // Claude Code's SPINNER_VERBS, minus the hyphenated/tongue-twister ones. Longest kept is ~14 chars
+    // ("Hullaballooing"/"Metamorphosing"); with the timer showing they can get wide in a crowded menu bar.
+    let thinkingWords = [
+        "Accomplishing", "Actioning", "Actualizing", "Architecting", "Baking", "Beaming", "Beboppin'",
+        "Befuddling", "Billowing", "Blanching", "Bloviating", "Boogieing", "Boondoggling", "Booping",
+        "Bootstrapping", "Brewing", "Bunning", "Burrowing", "Calculating", "Canoodling", "Caramelizing",
+        "Cascading", "Catapulting", "Cerebrating", "Channeling", "Channelling", "Churning", "Clauding",
+        "Coalescing", "Cogitating", "Combobulating", "Composing", "Computing", "Concocting", "Considering",
+        "Contemplating", "Cooking", "Crafting", "Creating", "Crunching", "Crystallizing", "Cultivating",
+        "Deciphering", "Deliberating", "Determining", "Doing", "Doodling", "Drizzling", "Ebbing",
+        "Effecting", "Elucidating", "Embellishing", "Enchanting", "Envisioning", "Evaporating", "Fermenting",
+        "Finagling", "Flambéing", "Flowing", "Flummoxing", "Fluttering", "Forging", "Forming", "Frolicking",
+        "Gallivanting", "Galloping", "Garnishing", "Generating", "Gesticulating", "Germinating", "Gitifying",
+        "Grooving", "Gusting", "Harmonizing", "Hashing", "Hatching", "Herding", "Honking", "Hullaballooing",
+        "Hyperspacing", "Ideating", "Imagining", "Improvising", "Incubating", "Inferring", "Infusing",
+        "Ionizing", "Jitterbugging", "Julienning", "Kneading", "Leavening", "Levitating", "Lollygagging",
+        "Manifesting", "Marinating", "Meandering", "Metamorphosing", "Misting", "Moonwalking", "Moseying",
+        "Mulling", "Mustering", "Musing", "Nebulizing", "Nesting", "Noodling", "Nucleating", "Orbiting",
+        "Orchestrating", "Osmosing", "Perambulating", "Percolating", "Perusing", "Pollinating", "Pondering",
+        "Pontificating", "Pouncing", "Precipitating", "Processing", "Proofing", "Propagating", "Puttering",
+        "Puzzling", "Quantumizing", "Razzmatazzing", "Reticulating", "Roosting", "Ruminating", "Sautéing",
+        "Scampering", "Schlepping", "Scurrying", "Seasoning", "Shenaniganing", "Shimmying", "Simmering",
+        "Skedaddling", "Sketching", "Slithering", "Smooshing", "Spelunking", "Spinning", "Sprouting",
+        "Stewing", "Sublimating", "Swirling", "Swooping", "Symbioting", "Synthesizing", "Tempering",
+        "Thinking", "Thundering", "Tinkering", "Tomfoolering", "Transfiguring", "Transmuting", "Twisting",
+        "Undulating", "Unfurling", "Unravelling", "Vibing", "Waddling", "Wandering", "Warping",
+        "Whirlpooling", "Whirring", "Whisking", "Wibbling", "Working", "Wrangling", "Zesting", "Zigzagging"]
     var iconColor: NSColor? { iconSystem ? nil : brand } // nil => render as an adaptive template
     let codeGlyphs = ["✻", "✽", "✶", "✳", "✢"]
     let codePeaks: [CGFloat] = [1.0, 1.0, 1.0, 1.0, 1.0]
@@ -298,7 +333,7 @@ final class StatusController: NSObject, NSMenuDelegate {
         let d = UserDefaults.standard
         if d.object(forKey: "showTimer") != nil { showTimer = d.bool(forKey: "showTimer") }
         if d.object(forKey: "iconSystem") != nil { iconSystem = d.bool(forKey: "iconSystem") }
-        if d.object(forKey: "completionSound") != nil { playCompletionSound = d.bool(forKey: "completionSound") }
+        if d.object(forKey: "thinkingWords") != nil { useThinkingWords = d.bool(forKey: "thinkingWords") }
         if let s = d.string(forKey: "animStyle"), let st = AnimStyle(rawValue: s) { animStyle = st }
         let menu = NSMenu()
         menu.delegate = self
@@ -419,26 +454,10 @@ final class StatusController: NSObject, NSMenuDelegate {
     // to live-update the per-session elapsed clocks. menuNeedsUpdate rebuilds the rows on each open.
     func menuWillOpen(_ menu: NSMenu) {
         menuIsOpen = true
-        spinTimer?.invalidate()
-        let t = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in self?.spinTick() }
-        RunLoop.main.add(t, forMode: .common)  // .common so it fires during menu tracking
-        spinTimer = t
     }
     func menuDidClose(_ menu: NSMenu) {
         menuIsOpen = false
         sessionMenuItems.removeAll()
-        spinTimer?.invalidate(); spinTimer = nil
-    }
-
-    func spinTick() {
-        spinAngle += 5   // 30fps * 5° = 150°/s ≈ 0.42 rev/s, a calm spin
-        guard let img = rotatedSpinner(spinAngle) else { return }
-        let now = Date().timeIntervalSince1970
-        for (item, id) in sessionMenuItems {
-            guard let s = sessions[id], let v = item.view as? SessionRowView else { continue }
-            let eff = s.eff.isEmpty ? effectiveState(s, now: now) : s.eff
-            if eff == "thinking" || eff == "tool" { v.setIcon(img) }
-        }
     }
 
     // The session SET only changes on reopen (NSMenu can't add/remove rows reliably mid-track).
@@ -503,18 +522,18 @@ final class StatusController: NSObject, NSMenuDelegate {
         }
 
         menu.addItem(header("Options"))
-
         menu.addItem(toggleRow(title: "Show timer", isOn: showTimer) { [weak self] on in
             self?.showTimer = on
             UserDefaults.standard.set(on, forKey: "showTimer")
             self?.applyTitle()
         })
-        menu.addItem(toggleRow(title: "Completion sound (1m+)", isOn: playCompletionSound) { [weak self] on in
-            self?.playCompletionSound = on
-            UserDefaults.standard.set(on, forKey: "completionSound")
+        menu.addItem(toggleRow(title: "Thinking words", isOn: useThinkingWords) { [weak self] on in
+            self?.useThinkingWords = on
+            UserDefaults.standard.set(on, forKey: "thinkingWords")
+            self?.evaluate()   // re-render the bar label immediately with/without the rotating word
         })
 
-        let animParent = NSMenuItem(title: "Animation Style", action: nil, keyEquivalent: "")
+        let animParent = NSMenuItem(title: "Animation", action: nil, keyEquivalent: "")
         let animSub = NSMenu()
         for (style, name) in [(AnimStyle.web, "Claude Spark"), (AnimStyle.code, "Claude Code"), (AnimStyle.crab, "Crab Walking")] {
             let it = NSMenuItem(title: name, action: #selector(chooseStyle(_:)), keyEquivalent: "")
@@ -526,7 +545,7 @@ final class StatusController: NSObject, NSMenuDelegate {
         animParent.submenu = animSub
         menu.addItem(animParent)
 
-        let colorParent = NSMenuItem(title: "Color theme", action: nil, keyEquivalent: "")
+        let colorParent = NSMenuItem(title: "Color", action: nil, keyEquivalent: "")
         let colorSub = NSMenu()
         for (sys, name) in [(false, "Orange"), (true, "System")] {
             let it = NSMenuItem(title: name, action: #selector(chooseColor(_:)), keyEquivalent: "")
@@ -574,18 +593,15 @@ final class StatusController: NSObject, NSMenuDelegate {
         return it
     }
 
-    func toggleRow(title: String, isOn: Bool, onToggle: @escaping (Bool) -> Void) -> NSMenuItem {
+    func toggleRow(title: String, qualifier: String? = nil, isOn: Bool, onToggle: @escaping (Bool) -> Void) -> NSMenuItem {
         let width = CGFloat(uiConfig()["boxWidth"] ?? 300), height: CGFloat = 24, leftInset: CGFloat = 14, rightInset: CGFloat = 12
         let row = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         row.autoresizingMask = [.width]
 
-        // Dim a trailing parenthetical (e.g. the "(1m+)" qualifier) so it reads as a secondary note.
         let labelFont = NSFont.menuFont(ofSize: 0)
-        let attr = NSMutableAttributedString(string: title, attributes: [.font: labelFont, .foregroundColor: NSColor.labelColor])
-        if let r = title.range(of: " (") {
-            attr.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: NSRange(r.lowerBound..<title.endIndex, in: title))
-        }
-        let label = NSTextField(labelWithAttributedString: attr)
+        let label = NSTextField(labelWithString: title)
+        label.font = labelFont
+        label.textColor = .labelColor
         label.sizeToFit()
         label.setFrameOrigin(NSPoint(x: leftInset, y: (height - label.frame.height) / 2))
         label.autoresizingMask = [.maxXMargin]
@@ -593,9 +609,23 @@ final class StatusController: NSObject, NSMenuDelegate {
 
         let toggle = ToggleView(isOn: isOn)
         toggle.onToggle = onToggle
-        toggle.setFrameOrigin(NSPoint(x: width - toggle.frame.width - rightInset, y: (height - toggle.frame.height) / 2))
+        let toggleX = width - toggle.frame.width - rightInset
+        toggle.setFrameOrigin(NSPoint(x: toggleX, y: (height - toggle.frame.height) / 2))
         toggle.autoresizingMask = [.minXMargin]
         row.addSubview(toggle)
+
+        // Optional trailing qualifier ("5 min+") pinned just left of the toggle, in the SAME font/size/color
+        // and right-alignment as the session-row timer, so the two read as the same kind of trailing note.
+        if let qualifier = qualifier {
+            let qW: CGFloat = 74, gap: CGFloat = 8
+            let q = NSTextField(labelWithString: qualifier)
+            q.font = NSFont.monospacedSystemFont(ofSize: labelFont.pointSize - 2, weight: .regular)
+            q.textColor = .secondaryLabelColor
+            q.alignment = .right
+            q.frame = NSRect(x: toggleX - gap - qW, y: (height - 16) / 2, width: qW, height: 16)
+            q.autoresizingMask = [.minXMargin]
+            row.addSubview(q)
+        }
 
         let item = NSMenuItem()
         item.view = row
@@ -632,6 +662,7 @@ final class StatusController: NSObject, NSMenuDelegate {
         let tag = surfaceTag(s.entrypoint)
         v.configure(icon: sessionSymbol(s, eff: eff),
                     iconTint: resting ? .tertiaryLabelColor : .labelColor,  // caret dim; spinner matches the name font; amber image ignores tint
+                    spinning: (eff == "thinking" || eff == "tool"),
                     name: truncated(sessionName(s), max: nameMax, keep: nameMax),
                     timer: working ? elapsed(max(0, Int(now - s.startedAt))) : nil,
                     pillNormal: tag.isEmpty ? nil : pillImage(tag),
@@ -699,7 +730,7 @@ final class StatusController: NSObject, NSMenuDelegate {
     func sessionSymbol(_ s: Session, eff: String) -> NSImage? {
         switch eff {
         case "permission":       return symbolImage("exclamationmark.circle.fill", tint: amber)
-        case "thinking", "tool": return rotatedSpinner(spinAngle)
+        case "thinking", "tool": return nil
         default:                 return restingCaret   // done/idle merged: dim "ready for input" caret
         }
     }
@@ -709,7 +740,7 @@ final class StatusController: NSObject, NSMenuDelegate {
     lazy var restingCaret: NSImage? = {
         let glyph = "\u{276F}" as NSString
         let font = NSFont.systemFont(ofSize: 11, weight: .medium)
-        let side = spinnerBase?.size.width ?? 15
+        let side: CGFloat = 15
         let img = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
             let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.black]
             let g = glyph.size(withAttributes: attrs)
@@ -719,38 +750,6 @@ final class StatusController: NSObject, NSMenuDelegate {
         img.isTemplate = true   // tint via contentTintColor: dim (tertiary) normally, white on hover
         return img
     }()
-
-    // Pre-rendered into a padded SQUARE canvas with the glyph centered, so rotation pivots on the
-    // visual center (an off-center pivot makes the spinner orbit/wobble instead of spinning in place).
-    lazy var spinnerBase: NSImage? = {
-        let name: String
-        if #available(macOS 15.0, *) { name = "progress.indicator" } else { name = "rays" }
-        let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
-        guard let sym = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(cfg) else { return nil }
-        let side = ceil(max(sym.size.width, sym.size.height)) + 2
-        let img = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
-            sym.draw(in: NSRect(x: (side - sym.size.width) / 2, y: (side - sym.size.height) / 2,
-                                width: sym.size.width, height: sym.size.height))
-            return true
-        }
-        img.isTemplate = true
-        return img
-    }()
-
-    func rotatedSpinner(_ angleDeg: CGFloat) -> NSImage? {
-        guard let base = spinnerBase else { return nil }
-        let size = base.size
-        let img = NSImage(size: size, flipped: false) { rect in
-            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
-            ctx.translateBy(x: size.width / 2, y: size.height / 2)
-            ctx.rotate(by: -angleDeg * .pi / 180)
-            ctx.translateBy(x: -size.width / 2, y: -size.height / 2)
-            base.draw(in: rect)
-            return true
-        }
-        img.isTemplate = true
-        return img
-    }
 
     func symbolImage(_ name: String, tint: NSColor? = nil) -> NSImage? {
         guard let img = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
@@ -778,8 +777,20 @@ final class StatusController: NSObject, NSMenuDelegate {
     }
 
     func workingLabel(_ s: Session) -> String {
+        if useThinkingWords, s.state == "thinking", let w = sessionWord[s.id], !w.isEmpty { return w + "…" }
         if !s.label.isEmpty { return s.label }
         return s.state == "tool" ? "Working…" : "Thinking…"
+    }
+
+    // Re-pick a word each time a session ENTERS the thinking state (prompt, or a tool->thinking `post`),
+    // avoiding an immediate repeat, so a tool round-trip lands a different word. Held steady while the
+    // session stays thinking. Computed regardless of the toggle so flipping it on shows instantly.
+    func updateThinkingWord(_ s: Session) {
+        let prev = prevState[s.id] ?? ""
+        guard s.state == "thinking", prev != "thinking" else { return }
+        var w = thinkingWords.randomElement() ?? "Thinking"
+        if thinkingWords.count > 1 { while w == sessionWord[s.id] { w = thinkingWords.randomElement() ?? w } }
+        sessionWord[s.id] = w
     }
 
     // "1m 1s" / "43s" — Claude Code's elapsed-clock style.
@@ -929,7 +940,6 @@ final class StatusController: NSObject, NSMenuDelegate {
 
     func evaluate() {
         let now = Date().timeIntervalSince1970
-        var chime = false
 
         for id in Array(sessions.keys) {
             guard var s = sessions[id] else { continue }
@@ -942,14 +952,14 @@ final class StatusController: NSObject, NSMenuDelegate {
                                  : (s.eff == "idle" && stalePruneAge > 0 && now - s.ts > stalePruneAge)
             if dead {
                 try? FileManager.default.removeItem(atPath: (stateDir as NSString).appendingPathComponent(id + ".json"))
-                sessions[id] = nil; fileMTimes[id + ".json"] = nil; soundPrev[id] = nil; turnStart[id] = nil
+                sessions[id] = nil; fileMTimes[id + ".json"] = nil; prevState[id] = nil; sessionWord[id] = nil
                 continue
             }
             sessions[id] = s
-            if soundEdgeDone(s, now: now) { chime = true }
+            updateThinkingWord(s)
+            prevState[s.id] = s.state
         }
-        for id in Array(soundPrev.keys) where sessions[id] == nil { soundPrev[id] = nil; turnStart[id] = nil }
-        if chime, playCompletionSound { completionSound?.play() }
+        for id in Array(prevState.keys) where sessions[id] == nil { prevState[id] = nil; sessionWord[id] = nil }
 
         // Surface the single highest-priority session (permission > working > …); ties broken by
         // recency, so within a tier the most recently active session wins.
@@ -986,17 +996,6 @@ final class StatusController: NSObject, NSMenuDelegate {
         return s.state == "done" ? "idle" : s.state
     }
 
-    // Detect a session's working->done edge for the chime (turns >= 1 min only). Updates the
-    // per-session bookkeeping every call and returns true exactly once per qualifying edge.
-    func soundEdgeDone(_ s: Session, now: Double) -> Bool {
-        let prev = soundPrev[s.id] ?? ""
-        if s.state == "thinking" || s.state == "tool", s.startedAt > 0 { turnStart[s.id] = s.startedAt }
-        var edge = false
-        if s.state == "done", prev != "done", let st = turnStart[s.id], st > 0, now - st >= 60 { edge = true }
-        if s.state == "done" { turnStart[s.id] = 0 }
-        soundPrev[s.id] = s.state
-        return edge
-    }
 
     // MARK: self-quit lifecycle
 
