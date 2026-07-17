@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Questions or help
+    url: https://x.com/mickces
+    about: DM me on X (@mickces)
+  - name: 🔧 Troubleshooting Guide
+    url: https://github.com/m1ckc3s/claude-status-bar/blob/main/TROUBLESHOOTING.md
+    about: Common issues and how to fix them
+  - name: 🍴 Power users
+    url: https://techgaun.github.io/active-forks/index.html#m1ckc3s/claude-status-bar
+    about: Check out community forks for Codex, Windows, Linux, and more.

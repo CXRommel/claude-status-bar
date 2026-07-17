@@ -8,7 +8,7 @@ It's also inspired a bunch of forks and ports, Codex versions, Linux, Windows, o
 
 ## What's welcome
 
-Bug fixes, performance wins, animation and visual polish, better session focus, and compatibility fixes (macOS versions, CPU architectures, terminals).
+Bug fixes, performance wins, animation and visual polish, better session focus, and compatibility fixes (macOS versions, CPU architectures, terminals). New crab animations and icon styles are especially welcome.
 
 Also the [known issues and suggestions](https://github.com/m1ckc3s/claude-status-bar/issues/22): it tracks proposed enhancements, and anything marked in scope there is open to pick up.
 

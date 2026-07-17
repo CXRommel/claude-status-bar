@@ -42,7 +42,7 @@ Everything is controlled from the menu:
 
 ## Install
 
-### Option A — DMG (recommended) 
+### DMG
 
 Signed and notarized.
 
@@ -50,6 +50,8 @@ Signed and notarized.
 2. Open it and drag **Claude Status Bar** into Applications.
 3. Launch it once. On first launch it wires up the Claude Code hooks for you automatically.
 4. Start a new Claude Code session, the icon appears whenever Claude Code is running.
+
+> **Official `brew install` coming soon.**
 
 ### Updating
 
@@ -63,18 +65,6 @@ Download the latest DMG and drag it into Applications (choose **Replace**). That
 - macOS 12+
 - [Claude Code](https://claude.com/claude-code) (CLI or the Desktop app)
 - Node.js
-
-
-### Option B — Claude Code plugin
-
-Installs the hooks (status + open/close lifecycle) automatically from inside Claude Code:
-
-```
-/plugin marketplace add m1ckc3s/claude-status-bar
-/plugin install claude-status-bar@claude-status-bar
-```
-
-The plugin installs the hooks but not the app itself, so drag **Claude Status Bar** into Applications once (from the DMG). The plugin launches it automatically on session start.
 
 ## How it works
 
@@ -105,10 +95,6 @@ This is an unofficial, open-source side project. **It is not affiliated with, en
 
 If I'm violating or impeding your trademark, Contact me on X ([@mickces](https://x.com/mickces))
 This is a free side project; I'm not monetizing it.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for what fits, what doesn't, and how to build.
 
 ## License
 
