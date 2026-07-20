@@ -107,11 +107,12 @@ final class SessionRowView: NSView {
     private let nameField = NSTextField(labelWithString: "")
     private let timerField = NSTextField(labelWithString: "")
     private let pillView = NSImageView()
-    private let pad: CGFloat = 14, iconSize: CGFloat = 16, rowH: CGFloat = 24, timerW: CGFloat = 74
+    private let pad: CGFloat = 14, iconSize: CGFloat = 16, rowH: CGFloat = 24
     private let highlightView = NSVisualEffectView()  // system selection material = exact native highlight
     private var hovered = false
     private var iconBaseTint: NSColor?       // tint when not hovered (template icons); white on hover
     private var pillNormal: NSImage?, pillSelected: NSImage?
+    private var nameText = "", branchText = ""
 
     init(id: String, width: CGFloat) {
         self.id = id
@@ -153,7 +154,7 @@ final class SessionRowView: NSView {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func configure(icon: NSImage?, iconTint: NSColor?, spinning: Bool, name: String, timer: String?,
+    func configure(icon: NSImage?, iconTint: NSColor?, spinning: Bool, name: String, branch: String, timer: String?,
                    pillNormal: NSImage?, pillSelected: NSImage?, pillInset: CGFloat, timerGap: CGFloat) {
         let w = bounds.width
         iconView.image = icon
@@ -168,7 +169,8 @@ final class SessionRowView: NSView {
             spinner.isHidden = true
             iconView.isHidden = false
         }
-        nameField.stringValue = name
+        nameText = name; branchText = branch
+        renderName()
         self.pillNormal = pillNormal; self.pillSelected = pillSelected
         let pill = hovered ? pillSelected : pillNormal
         var pillLeft = w - pillInset
@@ -182,8 +184,44 @@ final class SessionRowView: NSView {
         if let timer = timer {
             timerField.isHidden = false
             timerField.stringValue = timer
-            timerField.frame = NSRect(x: pillLeft - timerGap - timerW, y: (rowH - 16) / 2, width: timerW, height: 16)
+            // Fit the column to the text (mono font, right edge anchored at the pill): a fixed-width
+            // column reserved ~50pt of blank space that pixel-truncated the name · branch next to it.
+            let font = timerField.font ?? NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+            let tw = ceil(timer.size(withAttributes: [.font: font]).width) + 2
+            // The timer font is 2pt smaller than the name font; equal-height boxes at the same y center
+            // the text, which leaves the smaller font's baseline higher and the digits visibly floating
+            // next to the name. Offset the frame so the two baselines coincide.
+            let nf = nameField.font ?? NSFont.menuFont(ofSize: 0)
+            let baseline = { (f: NSFont) in (16 - (f.ascender - f.descender)) / 2 - f.descender }
+            let dy = baseline(nf) - baseline(font)
+            timerField.frame = NSRect(x: pillLeft - timerGap - tw, y: (rowH - 16) / 2 + dy, width: tw, height: 16)
         } else { timerField.isHidden = true }
+        // Name stretches to whatever the timer/pill leave free (branch text made the fixed 160 tight);
+        // pixel truncation via the paragraph style handles overflow.
+        let nameRight = timer != nil ? timerField.frame.minX : pillLeft
+        nameField.frame.size.width = max(40, nameRight - timerGap - nameField.frame.minX)
+    }
+    // name in the label color, " · branch" dimmed — mirrored on hover, where setting textColor
+    // can't restyle an attributed string.
+    private func renderName() {
+        let para = NSMutableParagraphStyle()
+        para.lineBreakMode = .byTruncatingTail
+        // Barely-overflowing text otherwise gets its tracking silently condensed to fit ("default
+        // tightening"), so the same name renders visibly squished on a row whose timer narrows the
+        // field. Constant tracking on every row; overflow shows an honest ellipsis instead.
+        para.allowsDefaultTighteningForTruncation = false
+        let font = NSFont.menuFont(ofSize: 0)
+        let text = NSMutableAttributedString(string: nameText, attributes: [
+            .font: font, .paragraphStyle: para,
+            .foregroundColor: hovered ? NSColor.white : .labelColor,
+        ])
+        if !branchText.isEmpty {
+            text.append(NSAttributedString(string: " · " + branchText, attributes: [
+                .font: font, .paragraphStyle: para,
+                .foregroundColor: hovered ? NSColor.white.withAlphaComponent(0.75) : .secondaryLabelColor,
+            ]))
+        }
+        nameField.attributedStringValue = text
     }
     // Custom views don't get the menu's automatic hover highlight, so draw it ourselves.
     override func updateTrackingAreas() {
@@ -196,7 +234,7 @@ final class SessionRowView: NSView {
     private func setHover(_ h: Bool) {
         hovered = h
         highlightView.isHidden = !h
-        nameField.textColor = h ? .white : .labelColor
+        renderName()
         timerField.textColor = h ? .white : .secondaryLabelColor
         iconView.contentTintColor = h ? .white : iconBaseTint
         if !pillView.isHidden { pillView.image = h ? pillSelected : pillNormal }
@@ -229,6 +267,7 @@ final class StatusController: NSObject, NSMenuDelegate {
 
     struct Session {
         var id: String, state: String, label: String, project: String, instance: String, transcript: String
+        var cwd: String         // session working directory; "" on pre-upgrade files
         var entrypoint: String  // CLAUDE_CODE_ENTRYPOINT: "cli", "claude-desktop", …
         var termProgram: String // TERM_PROGRAM for CLI sessions: "Apple_Terminal", "iTerm.app", …
         var pid: Int32          // the session's `claude` process; kill(pid,0) drives liveness. 0 = pre-upgrade file.
@@ -236,6 +275,8 @@ final class StatusController: NSObject, NSMenuDelegate {
                                 // conversation seeds started=false and stays out of the dropdown.
         var startedAt: Double, ts: Double
         var eff: String = ""   // effective state, recomputed once per tick in evaluate()
+        var branch: String = ""      // git branch (or short SHA when detached); "" outside a repo
+        var displayName: String = "" // project, parent-qualified when two live sessions share a name
 
         init(json o: [String: Any], id: String) {
             self.id = id
@@ -244,6 +285,7 @@ final class StatusController: NSObject, NSMenuDelegate {
             self.project = o["project"] as? String ?? ""
             self.instance = o["instance"] as? String ?? ""
             self.transcript = o["transcript"] as? String ?? ""
+            self.cwd = o["cwd"] as? String ?? ""
             self.entrypoint = o["entrypoint"] as? String ?? ""
             self.termProgram = o["term_program"] as? String ?? ""
             self.pid = Int32(truncatingIfNeeded: (o["pid"] as? NSNumber)?.intValue ?? 0)
@@ -256,6 +298,7 @@ final class StatusController: NSObject, NSMenuDelegate {
     var fileMTimes: [String: Date] = [:]   // "<id>.json" -> last-parsed mtime (re-parse only on change)
     var instanceNames: [String: String] = [:]  // instance label -> friendly alias from instances.json
     var registryMTime: Date?                    // instances.json mtime (re-read only on change)
+    var gitHeadCache: [String: String] = [:]  // cwd -> resolved HEAD path ("" = confirmed non-git)
     var prevState: [String: String] = [:]  // id -> previous raw state per session
     var menuIsOpen = false                  // refresh the dropdown's per-session timers only while open
     var sessionMenuItems: [(item: NSMenuItem, id: String)] = []
@@ -474,6 +517,13 @@ final class StatusController: NSObject, NSMenuDelegate {
         menu.removeAllItems()
         checkForUpdate() // refreshes the update cache for next open (gated to once a day)
 
+        // Branches otherwise refresh only on hook events, so re-read on open (one tiny file read per
+        // session) to catch a checkout made while a session sat idle.
+        for (id, s) in sessions where !s.cwd.isEmpty {
+            if gitHeadCache[s.cwd] == "" { gitHeadCache[s.cwd] = nil }  // recheck non-git: may have been git-init'd since
+            var u = s; u.branch = branchForCwd(u.cwd); sessions[id] = u
+        }
+
         sessionMenuItems.removeAll()
         let now = Date().timeIntervalSince1970
         // Gate ONLY the desktop app: opening/clicking a conversation there seeds an idle session without
@@ -638,6 +688,7 @@ final class StatusController: NSObject, NSMenuDelegate {
         // The icon carries the state (spinner / amber dot / caret); the row text is just the project,
         // plus a live timer while working since the spinner can't convey elapsed.
         var line = truncated(sessionName(s))
+        if !s.branch.isEmpty { line += " · " + truncated(s.branch, max: 22, keep: 20) }
         if eff == "thinking" || eff == "tool", s.startedAt > 0 {
             line += "  " + elapsed(max(0, Int(now - s.startedAt)))
         }
@@ -656,7 +707,9 @@ final class StatusController: NSObject, NSMenuDelegate {
     func configureSessionRow(_ v: SessionRowView, _ s: Session, eff: String) {
         let cfg = uiConfig()
         let now = Date().timeIntervalSince1970
-        let nameMax = Int(cfg["nameMax"] ?? 16)
+        // Generous cap: the row's pixel truncation does the real limiting now that the name field
+        // sizes to the free space; this only guards against pathological strings.
+        let nameMax = Int(cfg["nameMax"] ?? 30)
         let working = (eff == "thinking" || eff == "tool") && s.startedAt > 0
         let resting = !(eff == "permission" || eff == "thinking" || eff == "tool")  // the dim caret
         let tag = surfaceTag(s.entrypoint)
@@ -664,11 +717,17 @@ final class StatusController: NSObject, NSMenuDelegate {
                     iconTint: resting ? .tertiaryLabelColor : .labelColor,  // caret dim; spinner matches the name font; amber image ignores tint
                     spinning: (eff == "thinking" || eff == "tool"),
                     name: truncated(sessionName(s), max: nameMax, keep: nameMax),
+                    branch: truncated(s.branch, max: 22, keep: 20),
                     timer: working ? elapsed(max(0, Int(now - s.startedAt))) : nil,
                     pillNormal: tag.isEmpty ? nil : pillImage(tag),
                     pillSelected: tag.isEmpty ? nil : pillImage(tag, selected: true),
                     pillInset: CGFloat(cfg["pillInset"] ?? 12),
                     timerGap: CGFloat(cfg["timerGap"] ?? 10))
+        // Truncated rows stay inspectable: full name, branch, and path on hover.
+        var tip = sessionName(s)
+        if !s.branch.isEmpty { tip += " · " + s.branch }
+        if !s.cwd.isEmpty { tip += "\n" + s.cwd }
+        v.toolTip = tip
     }
 
     func statusText(_ s: Session, eff: String) -> String {
@@ -679,12 +738,12 @@ final class StatusController: NSObject, NSMenuDelegate {
         }
     }
 
-    // Just the repo/cwd; the surface (CLI/APP) renders as a trailing badge instead of inline.
-    // A non-default CLAUDE_CONFIG_DIR (a distinct account) is prefixed with its friendly alias
-    // from instances.json so concurrent accounts are distinguishable; the plain `default`
-    // account shows the project alone.
+    // The repo/cwd (parent-qualified on a name collision); the surface (CLI/APP) renders as a
+    // trailing badge instead of inline. A non-default CLAUDE_CONFIG_DIR (a distinct account) is
+    // prefixed with its friendly alias from instances.json so concurrent accounts are
+    // distinguishable; the plain `default` account shows the project alone.
     func sessionName(_ s: Session) -> String {
-        let base = s.project.isEmpty ? "session" : s.project
+        let base = !s.displayName.isEmpty ? s.displayName : (s.project.isEmpty ? "session" : s.project)
         if s.instance.isEmpty || s.instance == "default" { return base }
         let alias = instanceNames[s.instance] ?? s.instance   // friendly registry name, else the raw label
         return "\(alias): \(base)"
@@ -934,8 +993,64 @@ final class StatusController: NSObject, NSMenuDelegate {
             guard let data = fm.contents(atPath: full),
                   let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
             let id = (f as NSString).deletingPathExtension
-            sessions[id] = Session(json: o, id: id)
+            var s = Session(json: o, id: id)
+            // A hook event means activity in that cwd, which may have JUST become a repo (git init /
+            // first branch mid-session) — a cached "" (non-git) would otherwise stick until app restart.
+            if gitHeadCache[s.cwd] == "" { gitHeadCache[s.cwd] = nil }
+            s.branch = branchForCwd(s.cwd)   // only on file change (a hook event), never on a bare tick
+            sessions[id] = s
         }
+    }
+
+    // MARK: git branch (no `git` spawn — .git/HEAD is a tiny text file)
+
+    // Resolve <cwd>'s HEAD path by walking toward /. A worktree/submodule has .git as a FILE
+    // containing "gitdir: <path>". Resolution walks directories, so cache it per cwd; a cached
+    // "" means confirmed non-git. Dropped by branchForCwd if the HEAD read later fails.
+    func gitHeadPath(_ cwd: String) -> String? {
+        if let hit = gitHeadCache[cwd] { return hit.isEmpty ? nil : hit }
+        let fm = FileManager.default
+        var dir = cwd, isDir: ObjCBool = false
+        for _ in 0..<40 {
+            let g = (dir as NSString).appendingPathComponent(".git")
+            if fm.fileExists(atPath: g, isDirectory: &isDir) {
+                var head: String? = nil
+                if isDir.boolValue {
+                    head = (g as NSString).appendingPathComponent("HEAD")
+                } else if let d = fm.contents(atPath: g), d.count <= 4096,
+                          let s = String(data: d, encoding: .utf8),
+                          let line = s.split(separator: "\n").first, line.hasPrefix("gitdir: ") {
+                    var gd = String(line.dropFirst(8)).trimmingCharacters(in: .whitespaces)
+                    if !gd.hasPrefix("/") { gd = ((dir as NSString).appendingPathComponent(gd) as NSString).standardizingPath }
+                    head = (gd as NSString).appendingPathComponent("HEAD")
+                }
+                gitHeadCache[cwd] = head ?? ""
+                return head
+            }
+            let parent = (dir as NSString).deletingLastPathComponent
+            if parent == dir || parent.isEmpty { break }
+            dir = parent
+        }
+        gitHeadCache[cwd] = ""
+        return nil
+    }
+
+    // HEAD is "ref: refs/heads/<branch>" on a branch, a bare commit hash when detached.
+    // nil (no branch text, no error) for non-git dirs and anything unrecognized.
+    func branchForCwd(_ cwd: String) -> String {
+        guard !cwd.isEmpty, let headPath = gitHeadPath(cwd) else { return "" }
+        guard let d = FileManager.default.contents(atPath: headPath), d.count <= 1024,
+              let s = String(data: d, encoding: .utf8) else {
+            gitHeadCache[cwd] = nil   // stale resolution (repo moved/deleted) — retry next time
+            return ""
+        }
+        let head = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if head.hasPrefix("ref: refs/heads/") { return String(head.dropFirst(16)) }
+        if head.hasPrefix("ref: ") { return ((head as NSString).lastPathComponent) }
+        if (40...64).contains(head.count), head.allSatisfy({ $0.isHexDigit && !$0.isUppercase }) {
+            return String(head.prefix(7))   // detached HEAD -> short SHA
+        }
+        return ""
     }
 
     func evaluate() {
@@ -960,6 +1075,25 @@ final class StatusController: NSObject, NSMenuDelegate {
             prevState[s.id] = s.state
         }
         for id in Array(prevState.keys) where sessions[id] == nil { prevState[id] = nil; sessionWord[id] = nil }
+
+        // Same-named projects (two clones/worktrees of one repo) get a parent-folder qualifier
+        // ("work/myrepo" vs "tmp/myrepo") so their rows stay tellable apart. Runs after the reap so
+        // dead sessions can't force a qualifier onto a now-unique name.
+        // Only non-empty cwds count as colliding locations: a pre-upgrade/warmup file without cwd is
+        // location-unknown, and counting its "" as a distinct place forced a bogus qualifier onto a
+        // genuinely unique row.
+        var cwdsByProject: [String: Set<String>] = [:]
+        for s in sessions.values where !s.project.isEmpty && !s.cwd.isEmpty { cwdsByProject[s.project, default: []].insert(s.cwd) }
+        for id in Array(sessions.keys) {
+            guard var s = sessions[id] else { continue }
+            if !s.cwd.isEmpty, (cwdsByProject[s.project]?.count ?? 0) > 1 {
+                let parent = (((s.cwd as NSString).deletingLastPathComponent) as NSString).lastPathComponent
+                s.displayName = parent.isEmpty ? s.project : parent + "/" + s.project
+            } else {
+                s.displayName = s.project
+            }
+            sessions[id] = s
+        }
 
         // Surface the single highest-priority session (permission > working > …); ties broken by
         // recency, so within a tier the most recently active session wins.

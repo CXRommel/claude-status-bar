@@ -3,6 +3,16 @@
 All notable changes to Claude Status Bar are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.4] - 2026-07-09
+
+### Added
+- **Session rows show the git branch** next to the project name ("myrepo · fix-auth"), read straight from `.git/HEAD` (no `git` invocation), works for worktrees, shows a short SHA when detached, shows nothing outside a repo. Updates on session activity and on opening the menu, so a folder that becomes a repo mid-session (git init, first branch) is picked up live. Thanks to [@ethan0905](https://github.com/ethan0905) ([#37](https://github.com/m1ckc3s/claude-status-bar/pull/37)).
+- **Same-named projects are told apart.** When two live sessions share a folder name (two clones or worktrees of one repo), rows qualify it with the parent folder: "work/myrepo" vs "tmp/myrepo". Hovering a row shows the full name, branch, and path.
+
+### Fixed
+- The dropdown timer now sits on the same text baseline as the session name instead of floating slightly high.
+- Long session names keep constant letter spacing on every row; a name that does not fit truncates with an ellipsis instead of being subtly squished next to the timer.
+
 ## [0.3.3] - 2026-07-08
 
 ### Changed
@@ -117,6 +127,7 @@ All notable changes to Claude Status Bar are documented here. This project follo
 - Signed and notarized DMG so it opens without a Gatekeeper warning.
 - Claude Code plugin marketplace manifest for the plugin install path.
 
+[0.3.4]: https://github.com/m1ckc3s/claude-status-bar/releases/tag/v0.3.4
 [0.3.3]: https://github.com/m1ckc3s/claude-status-bar/releases/tag/v0.3.3
 [0.3.2]: https://github.com/m1ckc3s/claude-status-bar/releases/tag/v0.3.2
 [0.3.1]: https://github.com/m1ckc3s/claude-status-bar/releases/tag/v0.3.1
